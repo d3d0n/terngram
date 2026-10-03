@@ -42,6 +42,7 @@ export class ChatState {
   editing: { id: number; draft: string; replyTo: number | null } | null = null;
   sending = false;
   pendingSend: PendingSend | null = null;
+  retryDisplayId: number | null = null;
   private incoming = new Set<number>();
   revision = 0;
   private changes = new Map<number, number>();
@@ -69,7 +70,16 @@ export class ChatState {
     for (const id of this.incoming) if (id <= maxId) this.incoming.delete(id);
   }
 
+  private displayedMessage(message: ChatMessage): ChatMessage {
+    if (this.retryDisplayId !== null && message.id === this.pendingSend?.message_id && message.sending_state)
+      return { ...message, id: this.retryDisplayId, sending_state: "failed" };
+    if (this.getMessage(message.id)?.sending_state === "failed" && message.sending_state === "queued")
+      return { ...message, sending_state: "failed" };
+    return message;
+  }
+
   receive(message: ChatMessage): boolean {
+    message = this.displayedMessage(message);
     const low = this.position(message.id);
     this.grouped = undefined;
     const isNew = this.messages[low]?.id !== message.id;
@@ -84,6 +94,7 @@ export class ChatState {
   }
 
   remove(ids: readonly number[]): void {
+    if (this.retryDisplayId !== null && this.pendingSend) ids = ids.filter(id => id !== this.retryDisplayId);
     const removed = new Set(ids);
     for (const id of ids) { this.changes.set(id, ++this.revision); this.incoming.delete(id); }
     this.grouped = undefined;
@@ -106,15 +117,26 @@ export class ChatState {
     for (const message of page) if (message.outgoing && message.read) this.readMax = Math.max(this.readMax, message.id);
     this.grouped = undefined;
     const safe: ChatMessage[] = [];
-    for (const message of page) {
+    for (const item of page) {
+      const message = this.displayedMessage(item);
       const changed = (this.changes.get(message.id) ?? 0) > started;
       const current = changed ? this.getMessage(message.id) : message;
       if (current) safe.push(current.outgoing && !current.read && current.id <= this.readMax ? { ...current, read: true } : current);
     }
+    if (this.retryDisplayId !== null) safe.sort((left, right) => left.id - right.id);
     const first = safe[0]?.id ?? -Infinity;
     const retained = replace ? this.messages.filter(message => message.id < first || (this.changes.get(message.id) ?? 0) > started) : this.messages;
     this.messages = mergeHistory(retained, safe);
     this.loaded = true;
+  }
+
+  /** Recover outbox text without replacing a newer draft or the draft saved before editing. */
+  restorePendingSend(): void {
+    const pending = this.pendingSend;
+    if (!pending?.text) return;
+    this.cancelEdit();
+    if (this.draft !== pending.text) this.draft = this.draft ? `${this.draft}\n\n${pending.text}` : pending.text;
+    if (this.draft === pending.text) this.replyTo = pending.reply_to;
   }
 
   edit(message: ChatMessage): void {

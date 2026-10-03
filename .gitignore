@@ -17,3 +17,6 @@ last-error.json
 *.db
 *.db-*
 .DS_Store
+tdlib/
+outbox.json
+send-sequence.json

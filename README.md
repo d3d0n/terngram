@@ -1,80 +1,138 @@
-# terngram
+# Terngram
 
-Неофициальный нативный текстовый клиент для **Tern**, использующий Telegram API: интерфейс через Tern Surface Protocol, соединение через Telethon/MTProto. Работает с личным аккаунтом — не Bot API и не Telegram Web; не является официальным приложением Telegram.
+**Telegram, at home in Tern.**
 
-> **Полное соответствие Telegram API Terms не достигнуто.** Не реализованы official sponsored messages и исчезновение TTL-контента; остаются транспортные и host-зависимые блокеры. [Матрица всех пунктов и условия выпуска](docs/desktop-parity.md#соответствие-telegram-api-terms) отделяет код от внешних обязательств. Неофициальные клиенты наблюдаются Telegram; отсутствие блокировки аккаунта не гарантируется.
+A keyboard-first Telegram client drawn natively by [Tern](https://stencil.so/tern). Your conversations take the space; commands stay one shortcut away. No embedded Telegram Web, no ANSI fallback.
 
-## Запуск
+Built with the [oh-my-pi](https://github.com/can1357/oh-my-pi) native UI toolkit and the official [TDLib](https://core.telegram.org/tdlib). Terngram is an **unofficial client** using the Telegram API with your personal account—not a bot or an official Telegram app.
 
-Нужны Tern с поддержкой TSP (проверено на 0.3.0), `uv`, Bun ≥ 1.3.14 и Python ≥ 3.12.
+[Quick start](#quick-start) · [Sign in](#sign-in) · [Keyboard](#keyboard) · [Current limits](#current-limits) · [Developing](#developing)
+
+## A conversation-first workspace
+
+- **One palette, not a permanent sidebar.** `Ctrl+K` finds chats and commands. Chat-name search is local; missing catalog pages load in the background without hiding ready results. `Ctrl+F` narrows the palette to chats.
+- **Pick up where you left off.** Draft text survives restarts. Recent chats, back/forward navigation, replies and editing keep everyday conversation close at hand.
+- **Delivery without the ceremony.** A compact sending indicator replaces routine delivery banners. Delivery state updates automatically; failed messages remain in the conversation and offer an explicit retry. A queued request is never presented as a successful send.
+- **Photos belong in the conversation.** Inline previews, grouped albums and a keyboard-operated gallery. Original images load on demand; image documents without thumbnails are not silently downloaded as previews.
+- **Useful context, not control clutter.** Chat type, participant counts, typing, privacy-filtered presence and read receipts. Contextual hints can be hidden without hiding errors or meaningful state.
+
+## Quick start
+
+### macOS release
+
+Download [Terngram 0.1.0](https://github.com/d3d0n/terngram/releases/tag/v0.1.0): **Apple Silicon, macOS 27+, Tern 0.4+**. Bun, Python, TDLib and their required runtime dependencies are included; no Homebrew or uv setup is needed to run the package.
+
+Download both the ZIP and its `.sha256` file, then run these commands in the download directory:
 
 ```sh
-cd ~/projects/terngram
-bun install             # один раз после клонирования
+shasum -a 256 -c terngram-0.1.0-macos-arm64.zip.sha256
+unzip terngram-0.1.0-macos-arm64.zip
+tern plugin install ./terngram
+```
+
+Restart Tern and choose **Open Terngram** from its command palette. If `tern` is not on your PATH, use `/Applications/Tern.app/Contents/MacOS/tern` for the install command.
+
+The package has no new Developer ID signature or Apple notarization; supplied runtime signatures are preserved. macOS may require explicit approval. Do not disable Gatekeeper globally. The macOS 27 minimum comes from the bundled native binaries, not from Tern's own minimum version. See the archive's `INSTALL.md` and `BUILD-INFO.json` for details.
+
+### Run from source
+
+Use an interactive **Tern** terminal. The current setup has been exercised on macOS with Tern 0.3.0; an ordinary terminal is not a substitute for its native surface protocol.
+
+You need [Bun](https://bun.sh/) **1.3.14+**, [uv](https://docs.astral.sh/uv/), Python **3.12+** and a native TDLib build **1.8.67 or newer**.
+
+From this checkout:
+
+```sh
+# Build the official native Telegram engine on macOS.
+brew install tdlib --HEAD
+
+# Install the UI dependencies, then launch inside Tern.
+bun install --frozen-lockfile
 uv run terngram
 ```
 
-`uv` создаёт Python-окружение и устанавливает зависимости. Запускать клиент нужно внутри Tern.
+`uv` manages the Python environment, including QR-image dependencies. It **does not install TDLib**. The older TDLib 1.8.0 Homebrew build does not meet this client's version floor; the command above builds current upstream sources instead. A minimum-version check is not a guarantee that every future native API change is compatible.
 
-## Вход и данные
-
-При первом запуске введи `api_id` и `api_hash`, зарегистрированные для собственного приложения на [my.telegram.org/apps](https://my.telegram.org/apps), затем номер телефона, код входа и пароль 2FA, если он включён. Следующий запуск использует сохранённую сессию. Для выпуска Terngram разработчик обязан получить собственный API ID приложения: произвольный ID, введённый пользователем, не доказывает выполнение этого требования. Нельзя заимствовать ID официального клиента или ограниченный пример ID из его исходников.
-
-Данные находятся в `~/.local/share/terngram` (или `$XDG_DATA_HOME/terngram`):
-
-- `credentials.json` — реквизиты приложения;
-- `account.session` — сессия Telegram.
-
-Каталог имеет права `0700`, файлы — `0600`. Код входа и пароль 2FA не сохраняются. **Не публикуй реквизиты и `account.session`: сессия даёт доступ к аккаунту.** Другой каталог можно указать через `uv run terngram --data-dir PATH`.
-
-При подключении клиент передаёт честные `initConnection`-метаданные: `Terngram <версия установленного пакета>`, тип устройства Desktop с архитектурой, реальную версию ОС, `en` для английского интерфейса и двухбуквенный язык системной локали процесса (fallback `en`). Имя компьютера, username и серийный номер не отправляются в этих полях. Официальные `lang_pack` и API ID не подставляются. Эти поля не гарантируют отсутствие ограничений аккаунта или соответствие всем API Terms.
-
-Telegram-контент разрешён только для обычного законного использования клиента, с соблюдением прав владельцев. Нельзя собирать/скрейпить/индексировать его для AI/ML, обучения, проверки или внедрения моделей: [условия лицензирования](https://telegram.org/tos/content-licensing) допускают лишь узкое исключение с индивидуальным явным, информированным, утвердительным и продолжающимся согласием всех затронутых пользователей для конкретного контента и контекста; согласие одного владельца аккаунта не распространяется на другие чаты.
-
-## Возможности и управление
-
-- Чаты и команды в единой палитре **Ctrl+K**; **Ctrl+F** — поиск чатов. Названия фильтруются локально, недостающие страницы догружаются последовательно и кешируются. Раннюю историю загружают кнопка у её начала или `↑` на первом сообщении.
-- Новые сообщения, изменения и удаления обновляются в реальном времени.
-- Отправка текста, ответ, редактирование, пересылка и удаление с подтверждением; черновики сохраняются между переключениями и запусками.
-- Статус разговора показывает тип, Telegram ID, число участников/подписчиков при доступности, непрочитанные и ограничения. Контекст сообщения или ответа — рядом с редактором.
-- При реальном вводе передаётся typing без текста черновика; входящие действия собеседников показываются временно. В personal chat отображается Telegram-provided online/last-seen с учётом privacy, отдельно от соединения. Собственный online/offline следует наблюдаемому вводу/idle, не точному host focus.
-- Фото показываются превью прямо в карточке; в альбоме — до четырёх превью. Полная галерея разрешает весь альбом и переключает фотографии ←/→. Image-документы без Telegram-миниатюры автоматически не скачиваются.
-- Send сохраняет `random_id` до сети, поэтому повтор той же неясно завершившейся попытки не создаёт новый ID. Успешная отправка возвращает вниз и отмечает чат прочитанным. Авточтение при недавней активности ограничено моделью detached; фактической видимости TSP не сообщает.
-- **Sign out…** в палитре отзывает только сессию terngram после подтверждения; закрытие клиента не разлогинивает.
-- В палитре последние пять посещённых чатов отделены от остальных. При поиске — единые результаты без секции Recent. **Back / Forward** и двойные ←/→ используют историю посещений, сохраняя черновики.
-- **Hide contextual hints / Show contextual hints** без отдельного хоткея скрывает Commands/Keys, подсказку ввода и Close/zoom hints просмотрщика, но не информацию об объектах и важные состояния.
-- У выбранного своего прочитанного сообщения в подходящей небольшой группе появляется **read N** — фактическое число из Telegram. Размер/срок доступности определяет server appConfig; нет фонового опроса всех сообщений.
-- FloodWait/SlowMode сохраняют server retry-after и блокируют соответствующие запросы до его истечения. Названия, аватары, количество участников и права обновляются по targeted Telegram updates.
-
-| Клавиши | Действие |
-| --- | --- |
-| `Ctrl+K` | Чаты и команды; `>` — команды, `@` — чаты |
-| Двойные `←` / `→` | Назад / вперёд по истории чатов при фокусе на сообщениях или в пустом редакторе |
-| `Ctrl+F` | Поиск чатов |
-| `Ctrl+G` | Всплывающая справка по контекстам |
-| `Tab` / `Shift+Tab` | Сообщения ↔ редактор |
-| `↑` / `↓` при фокусе на сообщениях | Выбрать сообщение / альбом; `↑` на первом — загрузить раннюю историю |
-| `Enter` / `R`, `E`, `F`, `P`, `X` или `⌫` при фокусе на сообщениях | Ответить, редактировать, переслать, открыть фото, запросить удаление |
-| `Enter` в редакторе / `Shift+Enter` | Отправить или сохранить / новая строка |
-| `↑` в пустом редакторе | Редактировать последнее своё текстовое сообщение |
-| `Ctrl+U` / `Ctrl+D` при фокусе на сообщениях | История на страницу вверх / вниз |
-| `Ctrl+L` | Последние сообщения |
-| `Ctrl+R` | Обновить чаты и историю |
-| `Esc` | Закрыть popup или отменить текущий режим без очистки черновика |
-| `Ctrl+Q` / `Ctrl+C` | Закрыть клиент |
-
-Основное управление рассчитано на MacBook Air: Home, End, Page Up/Down и F1–F12 не нужны. Отправка медиа, звонки и секретные чаты не поддерживаются.
-
-Техническая модель приложения/RPC: [docs/ui.md](docs/ui.md). Справочник поверхностей TSP: [docs/tern-api.md](docs/tern-api.md). Сопоставление надёжности с Telegram Desktop: [docs/desktop-parity.md](docs/desktop-parity.md).
-
-## Проверки
+The loader searches system and Homebrew locations. For a specific compatible library:
 
 ```sh
-bun run check
-bun run test
-bun .smoke-client.ts
+TERNGRAM_TDLIB_LIBRARY=/opt/homebrew/opt/tdlib/lib/libtdjson.dylib uv run terngram
 ```
 
-Тесты не обращаются к Telegram и не отправляют сообщения. Smoke запускает приложение через настоящий NativeBackend с изолированными данными и worker; он проверяет protocol/model, но не геометрию отрисованного Tern.
+See [development setup](docs/development.md) for dependency checks, troubleshooting and the native-library boundary.
 
-Ошибка показывает операцию и безопасный код причины. Приватный `last-error.json` в каталоге данных содержит только имена операции/исключения и места в стеке, без текстов сообщений, аргументов RPC, locals и секретов.
+## Sign in
+
+1. Obtain an API ID and API hash for your own application at [my.telegram.org/apps](https://my.telegram.org/apps), then enter them locally in Terngram.
+2. In an already signed-in Telegram app, open **Settings → Devices → Link Desktop Device** and scan the QR code.
+3. Enter your **two-step verification password** if requested.
+
+TDLib rotates the QR code automatically. Subsequent launches use the saved session. **QR and optional 2FA are the only login path:** there is no phone-number/code form, email login or signup flow.
+
+Closing Terngram keeps the session. **Sign out…** revokes this client's session after confirmation.
+
+## Keyboard
+
+Use **Control**, not Command. No function-key row, Home/End or Page Up/Down required.
+
+| Where | Keys | Action |
+| --- | --- | --- |
+| Chats, no overlay | `Ctrl+K` / `Ctrl+F` | Chats and commands / chats only |
+| No overlay or busy operation | `Ctrl+G` | Contextual keyboard help |
+| Conversation | `Tab` / `Shift+Tab` | Move between messages and composer |
+| Composer | `Enter` / `Shift+Enter` | Send / insert a newline |
+| Messages | `↑` / `↓` | Select a message or album |
+| Messages | `Enter` | Reply; retry when a failed message is selected |
+| Messages | `R`, `E`, `F`, `P`, `X` | Reply, edit own text, forward, view photo, request deletion of an own message |
+| Messages | `Ctrl+U` / `Ctrl+D` | Page through the conversation |
+| Conversation | `Ctrl+L` | Jump to the latest messages |
+| Messages or empty composer | Double `←` / `→` | Back / forward through visited chats |
+| Photo gallery | `←` / `→` | Previous / next photo |
+| Overlay, confirmation, selection or reply/edit | `Esc` | Close or cancel that context—not an in-flight send |
+| Anywhere | `Ctrl+Q` / `Ctrl+C` | Save local state and quit |
+
+In the palette, `>` limits results to commands and `@` to chats. Without either prefix, both are searchable. The [UI guide](docs/ui.md) covers action eligibility, focus and destructive confirmations.
+
+## Your account stays local
+
+The default data directory is `~/.local/share/terngram`, or `$XDG_DATA_HOME/terngram`. Override it when needed:
+
+```sh
+uv run terngram --data-dir /path/to/private/terngram-data
+```
+
+It contains API credentials, TDLib authorization and message/media caches, drafts and delivery-recovery state. **Treat the entire directory as sensitive account data.** Private file permissions are not encryption at rest.
+
+Terngram does not write QR images, login links or your 2FA password into its own state or diagnostics. TDLib manages its own private authorization persistence. Tern receives the content it renders, including QR images and secret input: the host is part of the trust boundary. See [privacy and security](docs/security.md).
+
+
+## Current limits
+
+This is a focused client, not feature parity with Telegram Desktop.
+
+- No calls, secret chats, file/photo sending, audio/video playback, stickers, reactions or polls.
+- No global user search or message search; palette search covers your loaded chat catalog.
+- No cloud-draft synchronization or multi-account switcher.
+- Protected/view-once media that needs an enforceable protected viewer is not displayed.
+
+
+## Developing
+
+Start with [AGENTS.md](AGENTS.md) for the documentation index, or go straight to the [development guide](docs/development.md).
+
+```sh
+bun run check          # TypeScript contracts
+bun run test           # Bun tests and Python unittest suite
+bun .smoke-client.ts   # Native frames, app transitions and isolated worker storage
+```
+
+The automated suite uses isolated fixtures, not your Telegram account. The smoke harness exercises the real native backend/document machinery, but it does not prove Tern's painted geometry or live Telegram delivery.
+
+| Guide | What it owns |
+| --- | --- |
+| [Development](docs/development.md) | Runtime map, change routing, checks and debugging |
+| [Backend](docs/backend.md) | TDLib, worker RPC, authorization, storage and the outbox |
+| [UI](docs/ui.md) | App state, keyboard behavior, delivery feedback and media |
+| [Tern API](docs/tern-api.md) | Native nodes, events, blobs, scrolling and host boundaries |
+| [Security](docs/security.md) | Private data, trust boundaries and API Terms status |
+| [Desktop parity](docs/desktop-parity.md) | Behavior comparisons and upstream references |

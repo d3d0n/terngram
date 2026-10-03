@@ -12,7 +12,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog="terngram",
         description="Native Telegram text client for Tern. Credentials are entered locally and stored privately, outside the project.",
-        epilog="First run: obtain your own API ID/hash at https://my.telegram.org/apps. Never share account.session; it grants access to your account. In the app: Tab changes fields; Enter submits; Ctrl+C quits.",
+        epilog="First run: obtain your own API ID/hash at https://my.telegram.org/apps, then scan the QR code in Telegram Settings > Devices > Link Desktop Device. Enter your 2FA password if requested. Never share the private tdlib data directory; it grants access to your account. In the app: Tab changes fields; Enter submits; Ctrl+C quits.",
     )
     parser.add_argument("--version", action="version", version=f"terngram {version('terngram')}")
     parser.add_argument(

@@ -5,7 +5,7 @@ import { base64ImageNode } from "@oh-my-pi/pi-tui/native/blobs";
 import type { DescribeContext, NativeNode, NativeScroll, NativeSurface, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import { getEditorTheme } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 import { type Component, type OverlayHandle, type TerminalFramePlan, TUI } from "@oh-my-pi/pi-tui/tui";
-import { type ChatMessage, type ClientState, type Dialog, type DialogCursor, type DialogPage, type Photo, type TelegramUpdate, Telegram } from "./telegram";
+import { type Authorization, type ChatMessage, type ClientState, type Dialog, type DialogCursor, type DialogPage, type PendingSend, type Photo, type TelegramUpdate, Telegram, TelegramRequestError } from "./telegram";
 import { ForwardPicker } from "./forward-picker";
 import { ChatState } from "./chat-state";
 import { CommandPalette, type PaletteItem } from "./command-palette";
@@ -25,12 +25,12 @@ const SINGLE_PRESS_KEYS = ["enter", "ctrl+enter", "escape", "ctrl+r", "ctrl+g", 
 const photoKey = (message: ChatMessage): string => `${message.chat_id}:${message.id}:${message.media_id ?? "none"}`;
 /** Incoming messages in a followed open chat count as read only after recent user input. */
 const PRESENCE_MS = 60_000;
-type Stage = "credentials" | "phone" | "code" | "password" | "chats" | "logout";
+type Stage = "credentials" | "qr" | "password" | "closed" | "chats" | "logout";
 const COPY: Record<Stage, { title: string; hint: string; submit: string }> = {
-  credentials: { title: "Connect Telegram", hint: "Terngram is an unofficial client using the Telegram API. Use your own application's API ID and API hash from my.telegram.org/apps.", submit: "Connect" },
-  phone: { title: "Sign in", hint: "Enter your phone number with its country code.", submit: "Request code" },
-  code: { title: "Login code", hint: "Check Telegram on your other device. You can go back to request another code.", submit: "Sign in" },
-  password: { title: "Two-step verification", hint: "Your password is masked and never stored.", submit: "Unlock" },
+  credentials: { title: "Connect Telegram", hint: "Terngram is an unofficial Telegram client. Use your application's API ID and API hash from my.telegram.org/apps.", submit: "Continue with QR" },
+  qr: { title: "Log in by QR code", hint: "Use Telegram on a device where you are already signed in.", submit: "Retry QR login" },
+  password: { title: "Two-step verification", hint: "Enter your Telegram password. It is masked and never stored.", submit: "Unlock" },
+  closed: { title: "Telegram connection closed", hint: "Reconnect to continue securely.", submit: "Reconnect" },
   chats: { title: "Chats", hint: "Choose a conversation.", submit: "Send" },
   logout: { title: "Sign out of terngram?", hint: "This revokes only this client's session and removes its local drafts.", submit: "Sign out" },
 };
@@ -58,7 +58,7 @@ class Field extends Input {
 class Body implements Component {
   private description?: NativeNode;
   constructor(private app: TerngramApp) {}
-  describe(): NativeNode { return this.description ??= this.app.describeBody(); }
+  describe(cx: DescribeContext): NativeNode { return this.description ??= this.app.describeBody(cx); }
   invalidate(): void { this.description = undefined; }
   handleNativeEvent(event: NativeUiEvent): void { this.app.handleNativeEvent(event); }
   render(): readonly string[] { throw new Error("terngram requires native Tern rendering."); }
@@ -83,6 +83,16 @@ export class TerngramApp implements Component {
   private online = false;
   private body = new Body(this);
   private telegram: Telegram;
+  private authorizationState: Authorization["state"] = "credentials";
+  private authorizationHint = "";
+  private authorizationVersion = 0;
+  private qrNode?: NativeNode;
+  private authOperation?: object;
+  private bootstrap?: { connection: Telegram; generation: number; promise: Promise<void> };
+  private bootstrapSendStates = new Map<string, Extract<TelegramUpdate, { kind: "send_state" }>>();
+  private abandonConfirm: string | null = null;
+  private reconcilingSends = new Map<string, { connection: Telegram; generation: number; timer?: Timer }>();
+  private savingEdits = new Set<ChatState>();
   private cooldowns = new RequestCooldowns();
   private readers = new ReaderCounts(
     (chat, id) => this.telegram.call<number | null>("message_readers", [chat, id]),
@@ -150,8 +160,7 @@ export class TerngramApp implements Component {
   private overlayReturnFocus?: Component;
   private apiId: Field;
   private apiHash: Field;
-  private phone: Field;
-  private code: Field;
+  private started = false;
   private password: Field;
   private composer: Editor;
 
@@ -160,10 +169,8 @@ export class TerngramApp implements Component {
     const disabled = () => this.busy;
     this.apiId = new Field("API ID", false, changed, disabled);
     this.apiHash = new Field("API hash (hidden)", true, changed, disabled);
-    this.phone = new Field("+country code and phone number", false, changed, disabled);
-    this.code = new Field("Telegram login code", true, changed, disabled);
     this.password = new Field("Telegram two-step password", true, changed, disabled);
-    for (const field of [this.apiId, this.apiHash, this.phone, this.code, this.password]) field.onSubmit = () => { void this.submit(); };
+    for (const field of [this.apiId, this.apiHash, this.password]) field.onSubmit = () => { void this.submit(); };
     this.composer = new Editor(getEditorTheme());
     this.composer.placeholder = () => this.showContextHints ? "Message · Enter sends · Shift+Enter adds a line" : "Message";
     this.composer.onChange = text => {
@@ -191,15 +198,21 @@ export class TerngramApp implements Component {
     connection.onUpdate = update => { if (this.telegram === connection && !this.quitting) this.receive(update); };
     connection.onStatus = connected => {
       if (this.telegram !== connection || this.quitting) return;
+      const wasOnline = this.online;
       this.online = connected;
       if (!connected) this.clearTransient();
       if (connected && this.stage === "chats" && !this.busy) void this.refresh();
       if (connected && this.stage === "chats" && this.selectedId !== null) this.activityCall("select_peer", [this.selectedId]);
+      if (connected && !wasOnline && this.stage === "chats") {
+        for (const [id, thread] of this.threads) if (thread.pendingSend) this.reconcileSend(id, thread, thread.pendingSend);
+      }
       this.redraw();
     };
     connection.onFailure = message => {
       if (this.telegram !== connection || this.quitting) return;
-      this.online = false; this.clearTransient(); this.fail(message);
+      this.online = false; this.clearTransient(); this.clearQr(); this.password.setValue("");
+      this.authorizationVersion++; this.authorizationState = "closed"; this.bootstrap = undefined;
+      this.authOperation = undefined; this.busy = false; this.stage = "closed"; this.fail(message);
     };
     return connection;
   }
@@ -261,7 +274,8 @@ export class TerngramApp implements Component {
         else next = Math.min(next, until);
       }
     }
-    if (Number.isFinite(next)) this.transientTimer = setTimeout(() => { this.expireTransient(); this.redraw(false); }, Math.max(1, next - Date.now()));
+    // Keep the absolute expiry; JS timers overflow delays above a signed int32.
+    if (Number.isFinite(next)) this.transientTimer = setTimeout(() => this.redraw(false), Math.min(2_147_483_647, Math.max(1, next - Date.now())));
   }
   private incomingActions(): string {
     return [...(this.selectedId === null ? [] : this.transientActions.get(this.selectedId)?.values() ?? [])]
@@ -277,7 +291,8 @@ export class TerngramApp implements Component {
   }
   private redraw(body = true): void {
     this.expireTransient();
-    this.composer.disableSubmit = this.busy || this.selectedId === null || this.selectedDialog()?.writable === false || !!this.currentThread()?.sending;
+    const thread = this.currentThread();
+    this.composer.disableSubmit = this.busy || this.selectedId === null || this.selectedDialog()?.writable === false || !!thread?.sending || (!!thread?.pendingSend && !thread.editing);
     if (this.stage === "chats" && this.composer.focused && this.selectedDialog()?.writable === false) this.tui.setFocus(this);
     this.palette?.setItems(this.paletteItems());
     this.palette?.setLoading(this.loadingMoreChats);
@@ -296,81 +311,197 @@ export class TerngramApp implements Component {
   private fields(): Component[] {
     switch (this.stage) {
       case "credentials": return [this.apiId, this.apiHash];
-      case "phone": return [this.phone];
-      case "code": return [this.code];
+      case "qr": case "closed": return [this];
       case "password": return [this.password];
       case "chats": return this.selectedId !== null && this.selectedDialog()?.writable !== false ? [this, this.composer] : [this];
       case "logout": return [this];
     }
   }
-  private async perform(status: string, action: () => Promise<void>): Promise<void> {
+  private async perform(status: string, action: (operation: object) => Promise<void>): Promise<void> {
     if (this.busy || this.quitting) return;
+    const operation = {};
+    this.authOperation = operation;
     this.busy = true; this.error = false; this.status = status; this.redraw();
-    try { await action(); }
-    catch (error) { this.fail(error); }
-    finally { this.busy = false; this.redraw(); this.focusDefault(); }
+    try { await action(operation); }
+    catch (error) { if (this.authOperation === operation && !this.quitting) this.fail(error); }
+    finally {
+      if (this.authOperation === operation) {
+        this.authOperation = undefined; this.busy = !!this.bootstrap; this.redraw(); this.focusDefault();
+      }
+    }
   }
   async start(): Promise<void> {
-    await this.perform("Checking account…", async () => {
-      if (!await this.telegram.call<boolean>("has_credentials")) {
-        this.status = "Credentials stay in your private data directory, not in this project."; return;
-      }
-      await this.connected(await this.telegram.call<boolean>("connect"));
-    });
+    if (this.started || this.quitting) return;
+    this.started = true;
+    await this.perform("Checking saved authorization…", () => this.authorizationCall("connect"));
   }
-  private async connected(authorized: boolean): Promise<void> {
-    if (!authorized) { this.clearAccount(); this.stage = "phone"; this.status = "Sign in to your Telegram account."; return; }
-    this.account = await this.telegram.call<string>("me");
-    const [page, state] = await Promise.all([
-      this.telegram.call<DialogPage>("dialogs"),
-      this.telegram.call<ClientState>("load_state"),
-    ]);
-    this.dialogs = page.dialogs; this.dialogCursor = page.cursor;
-    for (const [key, draft] of Object.entries(state.drafts)) {
-      const id = Number(key);
-      if (!this.threads.has(id)) this.thread(id).draft = draft;
-    }
-    for (const [key, pending] of Object.entries(state.pending_sends)) {
-      this.thread(Number(key)).pendingSend ??= pending;
-    }
-    this.stage = "chats"; this.online = true; this.error = false; this.status = "";
-    const selected = this.selectedId ?? state.selected_id;
-    if (selected !== null) {
-      if (!this.dialogs.some(dialog => dialog.id === selected)) {
-        const dialog = await this.telegram.call<Dialog | null>("dialog", [selected]);
-        if (dialog) this.dialogs.push(dialog);
+  private clearQr(): void {
+    this.qrNode = undefined;
+    this.body.invalidate();
+  }
+  private async authorizationCall(method: string, args: unknown[] = []): Promise<void> {
+    const connection = this.telegram, version = this.authorizationVersion;
+    let authorization: Authorization;
+    try { authorization = await connection.call<Authorization>(method, args); }
+    catch (error) {
+      if (connection !== this.telegram || this.quitting) return;
+      if (version !== this.authorizationVersion && this.authorizationState === "ready") {
+        await this.bootstrap?.promise; return;
       }
-      if (this.dialogs.some(dialog => dialog.id === selected)) await this.selectChat(selected);
-      if (this.selectedId !== null) this.activityCall("select_peer", [this.selectedId]);
+      throw error;
     }
+    // Events are authoritative: an RPC snapshot must not replace a newer QR/password/ready event.
+    if (connection !== this.telegram || this.quitting) return;
+    if (version === this.authorizationVersion) this.authorize(authorization);
+    await this.bootstrap?.promise;
+  }
+  private authorize(authorization: Authorization): void {
+    const previous = this.authorizationState;
+    this.authorizationVersion++;
+    this.authorizationState = authorization.state;
+    this.authorizationHint = authorization.hint ?? "";
+    this.clearQr();
+    if (authorization.state !== "password" || previous !== "password") this.password.setValue("");
+    if (authorization.state === "ready") {
+      if (this.stage !== "chats" && this.stage !== "logout") {
+        this.stage = "qr"; this.status = "Opening your chats…";
+        void this.connected();
+      }
+    } else {
+      this.bootstrap = undefined;
+      if (previous === "ready" || (this.account && authorization.state !== "closed")) this.clearAccount();
+      this.stage = authorization.state;
+      this.error = false;
+      this.status = authorization.state === "credentials" ? "API credentials stay in your private data directory."
+        : authorization.state === "qr" ? "Waiting for you to scan and confirm…"
+        : authorization.state === "password" ? "QR confirmed. Enter your two-step verification password."
+        : "The local Telegram connection is closed. Reconnect to continue.";
+      if (authorization.state === "qr" && authorization.qr) {
+        const photo = authorization.qr;
+        if (photo.mime !== "image/png" || photo.width !== photo.height || photo.width <= 0) {
+          this.fail("Telegram returned an invalid QR image. Retry QR login below.");
+        } else {
+          this.qrNode = base64ImageNode(photo.data, photo.mime, {
+            alt: "Telegram login QR code. Scan with Telegram on your signed-in device.",
+            aria: "Telegram login QR code",
+            max: { w: "36ch", h: "18lines" }, grow: 0, shrink: 1,
+            // Do not open the host's independent image viewer with a sensitive login token.
+            actions: { click: "qr-code" },
+          }, `login-qr-${this.authorizationVersion}`);
+        }
+      }
+      this.busy = !!this.authOperation;
+    }
+    this.redraw(); this.focusDefault();
+  }
+  private connected(): Promise<void> {
+    if (this.bootstrap) return this.bootstrap.promise;
+    if (this.authorizationState !== "ready" || this.quitting) return Promise.resolve();
+    const connection = this.telegram, generation = this.generation;
+    const existingThreads = new Set(this.threads.keys());
+    this.bootstrapSendStates.clear();
+    const bootstrap = { connection, generation, promise: Promise.resolve() };
+    this.bootstrap = bootstrap; this.busy = true; this.redraw();
+    const current = () => this.bootstrap === bootstrap && connection === this.telegram
+      && generation === this.generation && this.authorizationState === "ready" && !this.quitting;
+    bootstrap.promise = (async () => {
+      try {
+        const [account, page, state] = await Promise.all([
+          connection.call<string>("me"), connection.call<DialogPage>("dialogs"), connection.call<ClientState>("load_state"),
+        ]);
+        if (!current()) return;
+        this.account = account; this.dialogs = page.dialogs; this.dialogCursor = page.cursor;
+        for (const [key, draft] of Object.entries(state.drafts)) {
+          const id = Number(key);
+          if (Number.isSafeInteger(id) && id !== 0 && !existingThreads.has(id)) this.thread(id).draft = draft;
+        }
+        for (const thread of this.threads.values()) thread.pendingSend = null;
+        for (const [key, pending] of Object.entries(state.pending_sends)) {
+          const id = Number(key);
+          if (Number.isSafeInteger(id) && id !== 0) {
+            const thread = this.thread(id);
+            thread.pendingSend = pending;
+            if (pending.text && thread.draft === pending.text) thread.replyTo = pending.reply_to;
+          }
+        }
+        for (const update of this.bootstrapSendStates.values()) this.receive(update);
+        this.bootstrapSendStates.clear();
+        const selected = this.selectedId ?? state.selected_id;
+        if (selected !== null && !this.dialogs.some(dialog => dialog.id === selected)) {
+          const dialog = await connection.call<Dialog | null>("dialog", [selected]);
+          if (!current()) return;
+          if (dialog) this.dialogs.push(dialog);
+        }
+        this.stage = "chats"; this.error = false; this.status = "";
+        if (selected !== null && this.dialogs.some(dialog => dialog.id === selected)) await this.selectChat(selected);
+        if (!current()) return;
+        if (this.selectedId !== null) this.activityCall("select_peer", [this.selectedId]);
+        for (const [id, thread] of this.threads) if (thread.pendingSend) this.reconcileSend(id, thread, thread.pendingSend);
+      } catch (error) { if (current()) this.fail(error); }
+      finally {
+        if (this.bootstrap === bootstrap) {
+          this.bootstrap = undefined; this.busy = !!this.authOperation; this.redraw(); this.focusDefault();
+        }
+      }
+    })();
+    return bootstrap.promise;
   }
   private async submit(): Promise<void> {
-    if (this.stage === "chats") { await this.send(this.composer.getText()); return; }
-    await this.perform("Connecting to Telegram…", async () => {
+    if (this.stage === "chats") return;
+    if (this.stage === "qr" && this.qrNode && !this.error && this.authorizationState !== "ready") return;
+    if (this.stage === "closed") { await this.reconnect(); return; }
+    await this.perform(this.stage === "qr" ? "Retrying QR login…" : "Connecting to Telegram…", async operation => {
       switch (this.stage) {
         case "credentials": {
-          const id = Number(this.apiId.getValue()); const hash = this.apiHash.getValue().trim(); this.apiHash.setValue("");
-          await this.connected(await this.telegram.call<boolean>("connect", [id, hash])); return;
+          const id = Number(this.apiId.getValue()), hash = this.apiHash.getValue().trim();
+          if (!Number.isSafeInteger(id) || id <= 0 || !/^[a-f0-9]{32}$/i.test(hash))
+            throw new Error("Enter a valid API ID and 32-character API hash from my.telegram.org/apps.");
+          this.apiHash.setValue("");
+          await this.authorizationCall("connect", [id, hash]); return;
         }
-        case "phone": await this.telegram.call("request_code", [this.phone.getValue()]); this.stage = "code"; this.status = "Code requested. Check Telegram."; return;
-        case "code": {
-          const code = this.code.getValue(); this.code.setValue("");
-          if (await this.telegram.call<boolean>("sign_in_code", [code])) await this.connected(true);
-          else { this.stage = "password"; this.status = "Enter your two-step verification password."; }
-          return;
-        }
+        case "qr":
+          this.clearQr();
+          await this.authorizationCall(this.authorizationState === "ready" ? "auth_state" : "request_qr"); return;
         case "password": {
           const password = this.password.getValue(); this.password.setValue("");
-          await this.telegram.call("sign_in_password", [password]); await this.connected(true); return;
+          if (!password) throw new Error("Enter your two-step verification password.");
+          await this.authorizationCall("sign_in_password", [password]); return;
         }
-        case "logout":
+        case "logout": {
           clearTimeout(this.persistTimer); await this.persistChain;
-          await this.telegram.call("logout"); this.clearAccount(); this.stage = "phone"; this.status = "This client's session was revoked."; return;
+          if (this.authOperation !== operation || this.quitting) return;
+          const connection = this.telegram;
+          await connection.call("logout");
+          if (this.authOperation !== operation || this.telegram !== connection || this.quitting) return;
+          this.clearAccount();
+          const replacement = this.newConnection(); this.telegram = replacement;
+          await connection.close();
+          if (this.authOperation !== operation || this.telegram !== replacement || this.quitting) return;
+          this.authorizationVersion++; this.authorizationState = "closed"; this.stage = "closed";
+          await this.authorizationCall("connect"); return;
+        }
       }
+    });
+  }
+  private async changeCredentials(): Promise<void> {
+    await this.perform("Closing authorization…", async operation => {
+      this.authorizationVersion++; this.clearQr(); this.password.setValue(""); this.apiHash.setValue("");
+      await this.persist();
+      if (this.authOperation !== operation || this.quitting) return;
+      const connection = this.telegram;
+      const replacement = this.newConnection();
+      this.telegram = replacement; // Old callbacks become stale before its close can emit authorization.
+      await connection.close();
+      if (this.authOperation !== operation || this.telegram !== replacement || this.quitting) return;
+      this.clearAccount(); this.bootstrap = undefined; this.authorizationState = "credentials";
+      this.authorizationHint = ""; this.stage = "credentials"; this.error = false;
+      this.status = "Enter your application's API credentials.";
     });
   }
   private clearAccount(): void {
     this.clearTransient();
+    for (const request of this.reconcilingSends.values()) clearTimeout(request.timer);
+    this.reconcilingSends.clear(); this.savingEdits.clear();
     this.generation++; clearTimeout(this.persistTimer); this.closeHelp(); this.closePalette(); this.closePhoto(); this.closeForwardPicker();
     clearTimeout(this.readerTimer);
     this.dialogCursor = undefined; this.moreChatsRequest = undefined; this.moreChatsToken = undefined; this.fillingDialogs = undefined; this.loadingMoreChats = false; this.searchingDialogs = false;
@@ -383,9 +514,10 @@ export class TerngramApp implements Component {
     this.dirtyDialogs.clear(); this.metadataVersions.clear(); this.peerNames.clear(); this.refreshingDirty = false;
     this.threads.clear(); this.scrolls.clear(); this.detached.clear(); this.photoNodes.clear();
     this.photoLoading.clear();
+    this.bootstrapSendStates.clear(); this.abandonConfirm = null;
     this.dialogs = []; this.selectedId = null; this.account = ""; this.online = false;
     this.actionMessage = this.deleteConfirm = null; this.setComposer("");
-    this.phone.setValue(""); this.code.setValue(""); this.password.setValue("");
+    this.clearQr(); this.password.setValue("");
   }
   private schedulePersist(): void {
     clearTimeout(this.persistTimer);
@@ -411,7 +543,7 @@ export class TerngramApp implements Component {
   }
 
   private async selectChat(id: number, fromHistory = false): Promise<void> {
-    if (!this.dialogs.some(dialog => dialog.id === id) || this.quitting) return;
+    if (this.stage !== "chats" || !Number.isSafeInteger(id) || !this.dialogs.some(dialog => dialog.id === id) || this.quitting) return;
     if (!fromHistory) this.navigation.visit(id);
     const changingChat = this.selectedId !== id;
     if (changingChat) { this.stopTyping(); this.activityCall("select_peer", [id]); }
@@ -501,6 +633,42 @@ export class TerngramApp implements Component {
     finally { thread.loading = false; this.redraw(); }
   }
   private receive(update: TelegramUpdate): void {
+    if (update.kind === "authorization") { this.authorize(update.authorization); return; }
+    if (update.kind === "send_state") {
+      if (this.bootstrap) this.bootstrapSendStates.set(update.token, update);
+      const thread = this.threads.get(update.chat_id), pending = thread?.pendingSend;
+      if (!thread || !pending || pending.token !== update.token) return;
+      if (update.status === "sent" || update.status === "abandoned") {
+        const request = this.reconcilingSends.get(pending.token);
+        if (request?.timer) { clearTimeout(request.timer); this.reconcilingSends.delete(pending.token); }
+      }
+      if (update.status === "sent") {
+        if (update.message) this.sent(update.chat_id, thread, pending, update.message);
+        else this.confirmed(update.chat_id, thread, pending); // Durable completion, not a message snapshot to replay.
+      } else if (update.status === "abandoned") {
+        thread.restorePendingSend(); thread.pendingSend = null;
+        if (this.currentThread() === thread) this.setComposer(thread.draft);
+        this.abandonConfirm = null; this.error = false;
+        this.status = pending.text ? update.admitted === false
+          ? "Nothing was submitted; text kept as draft."
+          : "Tracking stopped; text kept as draft. This does not cancel Telegram delivery."
+          : "Tracking stopped; composer draft unchanged. This does not cancel Telegram delivery.";
+        if (update.error) this.fail(update.error);
+      } else {
+        thread.pendingSend = { ...pending, status: update.status, ...(update.message_id !== undefined ? { message_id: update.message_id } : {}), error: update.error };
+        if (update.status === "failed") {
+          const failed = thread.getMessage(thread.retryDisplayId ?? pending.message_id ?? update.message_id ?? 0);
+          if (failed) {
+            thread.retryDisplayId ??= failed.id;
+            thread.receive({ ...failed, sending_state: "failed" });
+          }
+        }
+        if (update.message) this.receive({ kind: "message", chat_id: update.chat_id, message: update.message });
+        if (update.status !== "queued" && update.error) this.fail(update.error);
+      }
+      this.schedulePersist(); this.redraw(); return;
+    }
+    if (this.authorizationState !== "ready") return;
     if (update.kind === "presence") {
       this.dialogs = this.dialogs.map(dialog => dialog.id === update.chat_id ? { ...dialog, presence: update.presence } : dialog);
       this.expireTransient(); this.redraw(false); return;
@@ -510,16 +678,16 @@ export class TerngramApp implements Component {
       let actions = this.transientActions.get(update.chat_id);
       if (!actions) { actions = new Map(); this.transientActions.set(update.chat_id, actions); }
       const labels: Record<string, string> = {
-        SendMessageTypingAction: "typing…", SendMessageRecordAudioAction: "recording voice…",
-        SendMessageUploadAudioAction: "sending voice…", SendMessageRecordVideoAction: "recording video…",
-        SendMessageUploadVideoAction: "sending video…", SendMessageUploadPhotoAction: "sending photo…",
-        SendMessageUploadDocumentAction: "sending file…", SendMessageChooseStickerAction: "choosing sticker…",
-        SendMessageRecordRoundAction: "recording video message…", SendMessageUploadRoundAction: "sending video message…",
-        SendMessageGeoLocationAction: "sharing location…", SendMessageChooseContactAction: "choosing contact…",
-        SendMessageGamePlayAction: "playing game…", SpeakingInGroupCallAction: "speaking in call…",
+        chatActionTyping: "typing…", chatActionRecordingVoiceNote: "recording voice…",
+        chatActionUploadingVoiceNote: "sending voice…", chatActionRecordingVideo: "recording video…",
+        chatActionUploadingVideo: "sending video…", chatActionUploadingPhoto: "sending photo…",
+        chatActionUploadingDocument: "sending file…", chatActionChoosingSticker: "choosing sticker…",
+        chatActionRecordingVideoNote: "recording video message…", chatActionUploadingVideoNote: "sending video message…",
+        chatActionChoosingLocation: "sharing location…", chatActionChoosingContact: "choosing contact…",
+        chatActionStartPlayingGame: "playing game…", chatActionWatchingAnimations: "watching animations…",
       };
-      if (update.action === "SendMessageCancelAction") actions.delete(update.sender_id);
-      else actions.set(update.sender_id, { sender: update.sender, action: labels[update.action] ?? "active…", until: Date.now() + 6_000 });
+      if (update.action === "chatActionCancel" || update.expires_in <= 0) actions.delete(update.sender_id);
+      else actions.set(update.sender_id, { sender: update.sender, action: labels[update.action] ?? "active…", until: Date.now() + Math.min(Math.max(update.expires_in, 0), 60) * 1000 });
       this.expireTransient(); this.redraw(false); return;
     }
     if (update.kind === "dialog_changed") {
@@ -553,8 +721,9 @@ export class TerngramApp implements Component {
     }
     if (update.kind === "delete" && update.ids) {
       const ids = new Set(update.ids);
+      const affectsGallery = this.photoGroup?.chat_id === update.chat_id && this.albumMembers(this.photoGroup).some(message => ids.has(message.id));
       for (const [id, thread] of this.threads) {
-        if (id === update.chat_id || (update.chat_id === 0 && id > -1000000000000)) {
+        if (id === update.chat_id) {
           const affected = thread.messages.some(message => ids.has(message.id)) || this.dialogs.some(dialog => dialog.id === id && dialog.last_message_id !== null && ids.has(dialog.last_message_id));
           for (const message of thread.messages) if (ids.has(message.id)) this.invalidatePhoto(message);
           thread.remove(update.ids);
@@ -563,10 +732,7 @@ export class TerngramApp implements Component {
         }
       }
       if (this.currentThread()) this.setComposer(this.currentThread()!.draft);
-      if (this.photoGroup && (this.photoGroup.chat_id === update.chat_id || (update.chat_id === 0 && this.photoGroup.chat_id > -1000000000000))) {
-        const remaining = this.albumMembers(this.photoGroup).filter(message => !ids.has(message.id));
-        if (remaining.length) void this.viewPhoto(remaining[0]!, true); else this.closePhoto();
-      }
+      if (affectsGallery) this.closePhoto();
       this.redraw(); return;
     }
     if (update.kind === "read" && update.max_id !== undefined) {
@@ -582,7 +748,11 @@ export class TerngramApp implements Component {
     if (message.sender_id !== null) this.transientActions.get(message.chat_id)?.delete(message.sender_id);
     const thread = this.thread(update.chat_id);
     const previous = thread.getMessage(message.id);
-    if (previous && previous.media_id !== message.media_id) this.invalidatePhoto(previous);
+    if (previous && (previous.media_id !== message.media_id || previous.photo && !message.photo)) {
+      this.invalidatePhoto(previous);
+      if (!message.photo && this.photoGroup?.chat_id === message.chat_id && this.albumMembers(this.photoGroup).some(item => item.id === message.id))
+        this.closePhoto();
+    }
     const isNew = thread.receive(message);
     if (this.selectedId === message.chat_id) this.queueAvatar(message.sender_id);
     const dialog = this.dialogs.find(item => item.id === update.chat_id);
@@ -722,7 +892,7 @@ export class TerngramApp implements Component {
       try {
         const page = await this.telegram.call<DialogPage>("dialogs", [cursor]);
         if (generation !== this.generation) return false;
-        if (page.cursor && page.cursor.id === cursor.id && page.cursor.date === cursor.date && page.cursor.peer_id === cursor.peer_id) throw new Error("Telegram dialog pagination did not advance.");
+        if (page.cursor && (!Number.isSafeInteger(page.cursor.offset) || page.cursor.offset <= cursor.offset)) throw new Error("Telegram dialog pagination did not advance.");
         const ids = new Set(this.dialogs.map(dialog => dialog.id));
         this.dialogs.push(...page.dialogs.filter(dialog => !ids.has(dialog.id)));
         this.dialogCursor = page.cursor;
@@ -766,56 +936,187 @@ export class TerngramApp implements Component {
     void this.refreshDirtyDialogs();
   }
   private async reconnect(): Promise<void> {
-    await this.perform("Reconnecting…", async () => {
-      this.clearTransient();
-      await this.persist(); this.generation++; this.receipts.clear(); this.readers.clear(); this.participantCounts.clear(); this.resolvedAlbums.clear(); this.peerNames.clear();
-      await this.telegram.close(); this.telegram = this.newConnection();
-      await this.connected(await this.telegram.call<boolean>("connect"));
-      if (this.selectedId !== null) await this.loadHistory(this.selectedId, false, true);
+    await this.perform("Reconnecting…", async operation => {
+      this.clearTransient(); this.authorizationVersion++; this.clearQr(); this.password.setValue("");
+      await this.persist();
+      if (this.authOperation !== operation || this.quitting) return;
+      this.generation++; this.bootstrap = undefined; this.receipts.clear(); this.readers.clear();
+      this.participantCounts.clear(); this.resolvedAlbums.clear(); this.peerNames.clear();
+      const connection = this.telegram;
+      const replacement = this.newConnection(); this.telegram = replacement;
+      await connection.close();
+      if (this.authOperation !== operation || this.telegram !== replacement || this.quitting) return;
+      this.authorizationState = "closed"; this.stage = "closed";
+      await this.authorizationCall("connect");
+      if (this.account && this.selectedId !== null) await this.loadHistory(this.selectedId, false, true);
     });
   }
 
   private async send(text: string): Promise<void> {
     const id = this.selectedId;
-    if (id === null || !text.trim() || this.selectedDialog()?.writable === false || this.busy) return;
+    if (id === null || !text.trim() || this.stage !== "chats" || this.selectedDialog()?.writable === false || this.busy) return;
     const thread = this.thread(id);
     if (thread.sending) return;
-    this.stopTyping();
-    const generation = this.generation;
-    const editing = thread.editing;
-    const replyTo = thread.replyTo;
-    const previousAttempt = thread.pendingSend;
-    let submitted = false;
-    if (!editing && (thread.pendingSend?.text !== text || thread.pendingSend.reply_to !== replyTo)) {
-      const randomId = (crypto.getRandomValues(new BigUint64Array(1))[0]! >> 1n) || 1n;
-      thread.pendingSend = { text, reply_to: replyTo, random_id: String(randomId) };
+    const editing = thread.editing, replyTo = thread.replyTo;
+    if (!editing && thread.pendingSend) {
+      this.fail("A previous message is still pending. Delivery is tracked automatically; your new draft is kept.");
+      return;
     }
-    const attempt = thread.pendingSend;
-    thread.sending = true; this.error = false; this.status = ""; this.redraw(false);
+    this.stopTyping();
+    const connection = this.telegram, generation = this.generation;
+    let attempt: PendingSend | null = null;
+    let submitted = false;
+    if (editing) this.savingEdits.add(thread);
+    thread.sending = true; this.error = false; this.status = ""; this.redraw();
     try {
-      if (!editing) await this.persist(true); // Commit retry identity before the request can reach Telegram.
-      if (generation !== this.generation) return;
+      if (!editing) {
+        attempt = await connection.call<PendingSend>("prepare_send", [id, text, replyTo]);
+        if (connection !== this.telegram || generation !== this.generation || this.threads.get(id) !== thread) return;
+        thread.pendingSend = attempt;
+        await this.persist(true); // Persist the client intent before it can reach TDLib.
+      }
+      if (connection !== this.telegram || generation !== this.generation) return;
       submitted = true;
       const message = editing
-        ? await this.telegram.call<ChatMessage>("edit", [id, editing.id, text])
-        : await this.telegram.call<ChatMessage>("send", [id, text, replyTo, attempt!.random_id]);
+        ? await connection.call<ChatMessage>("edit", [id, editing.id, text])
+        : await connection.call<ChatMessage>("send", [id, text, replyTo, attempt!.token]);
       if (generation !== this.generation || this.threads.get(id) !== thread) return;
-      this.receive({ kind: "message", chat_id: id, message });
-      if (!editing && thread.pendingSend === attempt) thread.pendingSend = null;
-      if (thread.draft === text && thread.editing === editing && thread.replyTo === replyTo) {
-        if (editing) thread.cancelEdit();
-        else { thread.draft = ""; thread.replyTo = null; }
-        if (this.selectedId === id) this.setComposer(thread.draft);
+      if (attempt) this.sent(id, thread, attempt, message);
+      else {
+        this.receive({ kind: "message", chat_id: id, message });
+        if (thread.draft === text && thread.editing === editing) {
+          thread.cancelEdit();
+          if (this.selectedId === id) this.setComposer(thread.draft);
+        }
+        this.schedulePersist();
       }
-      if (!editing && this.selectedId === id) this.jumpBottom();
-      this.schedulePersist();
     } catch (error) {
       if (generation === this.generation) {
-        if (!submitted && thread.pendingSend === attempt) thread.pendingSend = previousAttempt;
+        if (attempt && thread.pendingSend?.token !== attempt.token) return; // A terminal backend event wins over this stale rejection.
+        if (!submitted && attempt && thread.pendingSend?.token === attempt.token) {
+          thread.pendingSend = null;
+          this.schedulePersist();
+        }
+        else if (attempt && thread.pendingSend?.token === attempt.token) {
+          this.reconcileSend(id, thread, thread.pendingSend);
+          if (thread.pendingSend.status === "queued") return;
+        }
         this.fail(error);
       }
+    } finally { this.savingEdits.delete(thread); thread.sending = false; this.redraw(); }
+  }
+  private sent(id: number, thread: ChatState, pending: PendingSend, message: ChatMessage): void {
+    if (message.sending_state) {
+      if (thread.pendingSend?.token !== pending.token) return; // A native terminal update wins over a stale queued RPC reply.
+      thread.pendingSend = { ...pending, status: message.sending_state, message_id: message.id };
+      this.receive({ kind: "message", chat_id: id, message });
+      if (message.sending_state === "failed") this.fail("Telegram could not send this message. Your draft is kept.");
+      else { this.error = false; this.status = ""; }
+      this.schedulePersist();
+      return;
     }
-    finally { thread.sending = false; this.redraw(false); }
+    if (thread.retryDisplayId !== null) {
+      const previousId = thread.retryDisplayId; thread.retryDisplayId = null;
+      if (previousId !== message.id) thread.remove([previousId]);
+      if (this.actionMessage === previousId) this.actionMessage = message.id;
+      if (this.deleteConfirm === previousId) this.deleteConfirm = null;
+    }
+    if (pending.message_id !== undefined && pending.message_id !== message.id) {
+      thread.remove([pending.message_id]);
+      if (this.actionMessage === pending.message_id) this.actionMessage = message.id;
+      if (this.deleteConfirm === pending.message_id) this.deleteConfirm = null;
+      this.dialogs = this.dialogs.map(dialog => dialog.id === id && dialog.last_message_id === pending.message_id
+        ? { ...dialog, last_message_id: message.id, preview: message.text } : dialog);
+    }
+    this.receive({ kind: "message", chat_id: id, message });
+    this.confirmed(id, thread, pending);
+  }
+  private confirmed(id: number, thread: ChatState, pending: PendingSend): void {
+    if (thread.pendingSend?.token === pending.token) {
+      thread.pendingSend = null;
+      if (pending.text && !thread.editing && thread.draft === pending.text && thread.replyTo === pending.reply_to) {
+        thread.draft = ""; thread.replyTo = null;
+        if (this.selectedId === id) this.setComposer("");
+      }
+    }
+    this.error = false; this.status = "";
+    if (this.selectedId === id) this.jumpBottom();
+    this.schedulePersist(); this.redraw();
+  }
+  private reconcileSend(id: number, thread: ChatState, pending: PendingSend): void {
+    const connection = this.telegram, generation = this.generation;
+    const existing = this.reconcilingSends.get(pending.token);
+    if (existing?.connection === connection && existing.generation === generation) return;
+    if (existing) clearTimeout(existing.timer);
+    const request = { connection, generation, timer: undefined as Timer | undefined };
+    this.reconcilingSends.set(pending.token, request);
+    const current = () => connection === this.telegram && generation === this.generation
+      && this.authorizationState === "ready" && !this.quitting
+      && this.threads.get(id) === thread && thread.pendingSend?.token === pending.token;
+    const run = async () => {
+      if (!current()) {
+        if (this.reconcilingSends.get(pending.token) === request) this.reconcilingSends.delete(pending.token);
+        return;
+      }
+      try { await connection.call("reconcile_send", [id, pending.token]); }
+      catch (error) {
+        if (current() && error instanceof TelegramRequestError && error.retryAfterSeconds > 0) {
+          request.timer = setTimeout(() => { request.timer = undefined; void run(); }, error.retryAfterSeconds * 1000);
+          return;
+        }
+        // Native send-state updates remain authoritative; a read failure must not imply non-delivery.
+      }
+      if (this.reconcilingSends.get(pending.token) === request) this.reconcilingSends.delete(pending.token);
+    };
+    void run();
+  }
+  private async retrySend(selected?: ChatMessage): Promise<void> {
+    const id = this.selectedId, thread = this.currentThread();
+    if (id === null || !thread || thread.sending || this.busy || this.stage !== "chats") return;
+    if (selected && (!selected.outgoing || selected.chat_id !== id || selected.sending_state !== "failed")) return;
+    let pending = thread.pendingSend;
+    const tracked = pending && (!selected || selected.id === pending.message_id || selected.id === thread.retryDisplayId);
+    if (tracked && pending?.status !== "failed") return;
+    if (!tracked && !selected) return;
+    const connection = this.telegram, generation = this.generation;
+    thread.sending = true; this.stopTyping(); this.error = false; this.status = ""; this.redraw();
+    try {
+      if (!tracked) {
+        pending = await connection.call<PendingSend>("adopt_failed_send", [id, selected!.id]);
+        if (connection !== this.telegram || generation !== this.generation || this.threads.get(id) !== thread) return;
+        thread.pendingSend = pending;
+        await this.persist(true); // Persist the adopted local identity before asking TDLib to retry it.
+      }
+      if (connection !== this.telegram || generation !== this.generation || !pending) return;
+      thread.retryDisplayId ??= selected?.id ?? pending.message_id ?? null;
+      const message = await connection.call<ChatMessage>("retry_send", [id, pending.token]);
+      if (generation === this.generation && this.threads.get(id) === thread) this.sent(id, thread, pending, message);
+    } catch (error) {
+      if (generation === this.generation) {
+        if (pending && thread.pendingSend?.token !== pending.token) return;
+        if (pending && thread.pendingSend?.token === pending.token) {
+          this.reconcileSend(id, thread, thread.pendingSend);
+          if (thread.pendingSend.status === "queued") return;
+        }
+        this.fail(error);
+      }
+    } finally { thread.sending = false; this.redraw(); }
+  }
+  private restoreSend(): void {
+    const thread = this.currentThread();
+    if (!thread?.pendingSend?.text || thread.sending || this.busy || this.stage !== "chats") return;
+    thread.restorePendingSend();
+    this.setComposer(thread.draft); this.schedulePersist(); this.redraw(); this.focusDefault();
+  }
+  private async abandonSend(): Promise<void> {
+    const id = this.selectedId, thread = this.currentThread(), pending = thread?.pendingSend;
+    if (id === null || !thread || !pending || pending.token !== this.abandonConfirm || pending.status !== "uncertain" || thread.sending || this.busy) return;
+    const connection = this.telegram, generation = this.generation;
+    thread.sending = true; this.stopTyping(); this.error = false; this.status = "Checking this send before stopping tracking…"; this.redraw();
+    try {
+      await connection.call("abandon_send", [id, pending.token]);
+    } catch (error) { if (generation === this.generation && thread.pendingSend?.token === pending.token) this.fail(error); }
+    finally { thread.sending = false; this.abandonConfirm = null; this.redraw(); }
   }
   private jumpBottom(): void {
     if (this.selectedId === null) return;
@@ -916,6 +1217,11 @@ export class TerngramApp implements Component {
       command("help", "Keyboard shortcuts", "Ctrl+G · context-sensitive controls"),
       command("toggle-context-hints", this.showContextHints ? "Hide contextual hints" : "Show contextual hints", "Toggle Commands / Keys, editor hints and viewer Close / zoom hints; keep object information"),
       command("bottom", "Latest messages", "Ctrl+L", !thread),
+      ...(thread?.pendingSend ? [
+        ...(thread.pendingSend.text ? [command("restore-send", "Restore pending text", "Keep newer draft text; delivery remains tracked", !!thread.sending || this.busy)] : []),
+        ...(thread.pendingSend.status === "failed" ? [command("retry-send", "Retry failed message", "Retry the confirmed failed Telegram message", !!thread.sending || this.busy)] : []),
+        ...(thread.pendingSend.status === "uncertain" ? [command("abandon-send", "Stop tracking this send…", "Only after checking this chat; does not cancel delivery", !!thread.sending || this.busy)] : []),
+      ] : []),
       ...(chosen ? [
         command("reply", "Reply to selected message", "R / Enter in messages", this.selectedDialog()?.writable === false || !!thread?.sending),
         command("forward", "Forward selected message", "F in messages"),
@@ -1030,7 +1336,8 @@ export class TerngramApp implements Component {
         await Promise.all(missing.map(async item => {
           const imageKey = photoKey(item);
           const photo = await this.telegram.call<Photo>("photo", [item.chat_id, item.id]);
-          if (generation !== this.generation || this.thread(item.chat_id).getMessage(item.id)?.media_id !== item.media_id) return;
+          const current = this.thread(item.chat_id).getMessage(item.id);
+          if (generation !== this.generation || !current?.photo || current.media_id !== item.media_id) return;
           this.photoNodes.set(imageKey, base64ImageNode(photo.data, photo.mime, { alt: "Telegram photo", max: { w: "80ch", h: "28lines" } }, `full-photo-${item.chat_id}:${item.id}`));
         }));
         if (generation !== this.generation) return;
@@ -1102,7 +1409,8 @@ export class TerngramApp implements Component {
         return { consume: true };
       }
       if (this.composer.focused && (matchesKey(data, "enter") || matchesKey(data, "ctrl+enter"))) {
-        void this.send(this.composer.getText()); return { consume: true };
+        if (!this.composer.disableSubmit) void this.send(this.composer.getText());
+        return { consume: true };
       }
       if (this.composer.focused && matchesKey(data, "up") && !this.composer.getText()) {
         const messages = this.currentThread()?.messages ?? [];
@@ -1118,7 +1426,10 @@ export class TerngramApp implements Component {
       const step = matchesKey(data, "shift+tab") ? -1 : 1;
       const next = fields[(current + step + fields.length) % fields.length] ?? this;
       this.tui.setFocus(next);
-      if (next === this && this.stage === "chats" && this.actionMessage === null) this.actionMessage = this.currentThread()?.groups.at(-1)?.[0]?.id ?? null;
+      if (next === this && this.stage === "chats" && this.actionMessage === null) {
+        const group = this.currentThread()?.groups.at(-1);
+        this.actionMessage = (group?.find(message => message.sending_state === "failed") ?? group?.[0])?.id ?? null;
+      }
       this.loadReaders();
       this.redraw(); return { consume: true };
     }
@@ -1126,7 +1437,7 @@ export class TerngramApp implements Component {
   }
   handleInput(data: string): void {
     if (this.busy) return;
-    if (this.stage === "logout" && matchesKey(data, "enter")) { void this.submit(); return; }
+    if (this.stage !== "chats" && matchesKey(data, "enter")) { void this.submit(); return; }
     if (this.stage !== "chats") return;
     const groups = this.currentThread()?.groups ?? [];
     if (matchesKey(data, "up") || matchesKey(data, "down")) {
@@ -1135,7 +1446,8 @@ export class TerngramApp implements Component {
       // The first loaded message is the keyboard edge of history; there is no viewport position to observe.
       if (up && current === 0 && this.selectedId !== null) void this.loadHistory(this.selectedId, true);
       const index = current < 0 ? groups.length - 1 : Math.max(0, Math.min(groups.length - 1, current + (up ? -1 : 1)));
-      this.actionMessage = groups[index]?.[0]?.id ?? null;
+      const group = groups[index];
+      this.actionMessage = (group?.find(message => message.sending_state === "failed") ?? group?.[0])?.id ?? null;
       if (index !== groups.length - 1 && this.selectedId !== null) this.detached.add(this.selectedId);
       this.loadReaders();
       this.redraw();
@@ -1143,20 +1455,28 @@ export class TerngramApp implements Component {
     }
     const message = this.chosenMessage();
     if (!message) return;
-    if (matchesKey(data, "enter") || matchesKey(data, "r")) this.reply(message);
+    if (matchesKey(data, "enter") && message.sending_state === "failed") void this.retrySend(message);
+    else if (matchesKey(data, "enter") || matchesKey(data, "r")) this.reply(message);
     else if (matchesKey(data, "e")) this.edit(message);
     else if (matchesKey(data, "f")) this.openForwardPicker(message);
     else if (matchesKey(data, "p") && message.photo) void this.viewPhoto(message);
     else if ((matchesKey(data, "x") || matchesKey(data, "backspace") || matchesKey(data, "delete")) && message.outgoing) { this.deleteConfirm = message.id; this.redraw(); }
   }
   handleNativeEvent(event: NativeUiEvent): void {
-    if (this.quitting || this.busy) return;
+    if (this.quitting) return;
+    if (event.type === "action" && event.act === "quit") { void this.quit(); return; }
+    if (this.busy) return;
     this.lastInput = Date.now();
     this.userActivity();
     if (event.type !== "action") return;
+    if (this.stage !== "chats" && !["submit", "restart-qr", "credentials", "reconnect", "cancel", "help"].includes(event.act)) return;
     const [action, value] = event.act.split(":");
-    if (action === "chat") { void this.selectChat(Number(value)); return; }
-    if (action === "message" || action === "reply-message" || action === "photo") {
+    if (action === "chat") {
+      const id = Number(value);
+      if (Number.isSafeInteger(id) && id !== 0) void this.selectChat(id);
+      return;
+    }
+    if (action === "message" || action === "reply-message" || action === "retry-message" || action === "photo") {
       const message = this.currentThread()?.messages.find(item => item.id === Number(value));
       if (!message) return;
       if (action === "message") {
@@ -1164,6 +1484,7 @@ export class TerngramApp implements Component {
         this.actionMessage = message.id; this.deleteConfirm = null; this.tui.setFocus(this); this.loadReaders(); this.redraw();
       }
       else if (action === "reply-message") this.reply(message);
+      else if (action === "retry-message" && message.sending_state === "failed") void this.retrySend(message);
       else void this.viewPhoto(message);
       return;
     }
@@ -1171,6 +1492,17 @@ export class TerngramApp implements Component {
     switch (event.act) {
       case "submit": void this.submit(); break;
       case "send": void this.send(this.composer.getText()); break;
+      case "retry-send": void this.retrySend(); break;
+      case "restore-send": this.restoreSend(); break;
+      case "abandon-send": {
+        const pending = this.currentThread()?.pendingSend;
+        if (pending?.status === "uncertain" && !this.currentThread()?.sending && !this.busy) {
+          this.abandonConfirm = pending.token; this.redraw();
+        }
+        break;
+      }
+      case "confirm-abandon-send": void this.abandonSend(); break;
+      case "cancel-abandon-send": this.abandonConfirm = null; this.redraw(); break;
       case "older": if (this.selectedId !== null) void this.loadHistory(this.selectedId, true); break;
       case "bottom": this.jumpBottom(); break;
       case "refresh": void this.refresh(); break;
@@ -1189,10 +1521,15 @@ export class TerngramApp implements Component {
       case "cancel-compose": this.cancelCompose(); break;
       case "cancel-delete": this.deleteConfirm = null; this.redraw(); break;
       case "dismiss-status": this.status = ""; this.error = false; this.redraw(false); break;
-      case "logout": this.stopTyping(); this.stage = "logout"; this.redraw(); this.tui.setFocus(this); break;
-      case "cancel": this.stage = "chats"; this.redraw(); this.focusDefault(); break;
-      case "back": this.stage = "phone"; this.code.setValue(""); this.password.setValue(""); this.redraw(); this.focusDefault(); break;
-      case "credentials": this.stage = "credentials"; this.redraw(); this.focusDefault(); break;
+      case "logout": if (this.stage === "chats") { this.stopTyping(); this.stage = "logout"; this.redraw(); this.tui.setFocus(this); } break;
+      case "cancel": if (this.stage === "logout") { this.stage = "chats"; this.redraw(); this.focusDefault(); } break;
+      case "restart-qr":
+        if (this.stage === "password") void this.perform("Discarding this unfinished login…", async () => {
+          this.password.setValue(""); this.clearQr();
+          await this.authorizationCall("request_qr");
+        });
+        break;
+      case "credentials": if (this.stage !== "chats" && this.stage !== "logout") void this.changeCredentials(); break;
       case "quit": void this.quit(); break;
     }
   }
@@ -1208,15 +1545,37 @@ export class TerngramApp implements Component {
       peerNames: this.peerNames,
     });
   }
-  describeBody(): NativeNode {
+  describeBody(cx?: DescribeContext): NativeNode {
     const title: NativeNode = { k: "text", key: "title", p: { spans: [{ t: "terngram", s: "strong accent" }] } };
     if (this.stage !== "chats") {
       const copy = COPY[this.stage];
-      return { k: "col", key: "login", p: { gap: "md" }, c: [title,
-        { k: "card", key: "welcome", p: { head: copy.title, tone: "accent" }, c: [
-          label(copy.hint),
-          { k: "text", key: "api-tools", p: { text: "Telegram API development tools", href: "https://my.telegram.org/apps", actions: { click: "open" }, tone: "info" } },
-          label("Credentials and session stay in private local files. Never share account.session."),
+      return { k: "col", key: `login-${this.stage}`, p: { role: "terngram.authorization", gap: "md", align: "center", min: { w: 0 } }, c: [
+        title,
+        { k: "card", key: "welcome", p: { head: this.stage === "qr" && this.authorizationState === "ready" ? "Opening Telegram" : copy.title, tone: "accent", max: { w: "64ch" }, min: { w: 0 } }, c: [
+          label(this.stage === "qr" && this.authorizationState === "ready"
+            ? this.error ? "Your account is authorized. Retry opening chats below." : "Your account is authorized. Loading your conversations…"
+            : copy.hint),
+          ...(this.stage === "credentials" ? [
+            { k: "text", key: "api-tools", p: { text: "Get your API credentials", href: "https://my.telegram.org/apps", actions: { click: "open" }, tone: "info" } } satisfies NativeNode,
+            label("Credentials and TDLib session stay in private local files. Never share them.", "privacy"),
+          ] : []),
+          ...(this.stage === "qr" && this.authorizationState !== "ready" ? [
+            { k: "col", key: "qr", p: { align: "center", gap: "md", min: { w: 0 } }, c: [
+              ...(cx?.supports("image") === false
+                ? [label("This terminal cannot display login QR images. Open terngram in an image-capable Tern window to sign in.", "qr-unsupported")]
+                : this.qrNode ? [this.qrNode] : [this.error
+                  ? label("QR login is unavailable. Retry below.", "qr-error")
+                  : { k: "spinner", key: "qr-loading", p: { label: "Preparing a secure QR code…" } } satisfies NativeNode]),
+              label("1. Open Telegram on your phone.", "qr-step-1"),
+              label("2. Go to Settings → Devices → Link Desktop Device.", "qr-step-2"),
+              label("3. Point your camera at this code and confirm.", "qr-step-3"),
+              ...(this.qrNode && !this.error && cx?.supports("image") !== false
+                ? [{ k: "spinner", key: "qr-waiting", p: { style: "dots", label: "Waiting for confirmation…" } } satisfies NativeNode] : []),
+              label("Codes update automatically. Scan only with Telegram; never share this QR code.", "qr-privacy"),
+            ] } satisfies NativeNode,
+          ] : []),
+          ...(this.stage === "password" && this.authorizationHint ? [label(`Password hint: ${this.authorizationHint}`, "password-hint")] : []),
+          ...(this.stage === "password" ? [label("To sign in with another account, discard this unfinished login using the button below. Existing Telegram sessions are not signed out.", "password-switch")] : []),
         ] },
       ] };
     }
@@ -1232,7 +1591,8 @@ export class TerngramApp implements Component {
   describe(): NativeNode {
     if (this.stage === "chats") {
       const selected = this.chosenMessage();
-      return describeChatDock({
+      const pending = this.currentThread()?.pendingSend;
+      const dock = describeChatDock({
         dialog: this.selectedDialog(), thread: this.currentThread(), selected,
         participantsCount: this.selectedId === null ? undefined : this.participantCounts.get(this.selectedId),
         peerNames: this.peerNames,
@@ -1240,20 +1600,38 @@ export class TerngramApp implements Component {
         messageFocus: this.focused, deleting: this.deleteConfirm !== null,
         showHints: this.showContextHints,
         operating: !!selected && this.messageOperations.has(`${selected.chat_id}:${selected.id}`),
-        online: this.online, busy: this.busy, status: this.status, error: this.error, editor: this.composer,
+        online: this.online, busy: this.busy, saving: !!this.currentThread() && this.savingEdits.has(this.currentThread()!), status: this.status, error: this.error, editor: this.composer,
       });
+      if (!pending || pending.status !== "uncertain") return dock;
+      return { k: "col", key: "outbox-dock", p: { gap: "sm" }, c: [
+        { k: "card", key: `pending-${pending.token}`, p: { head: "Delivery uncertain", tone: "warning" }, c: [
+          label(pending.error ?? "Delivery is tracked automatically. Check this conversation before deciding to stop tracking; your draft is safe."),
+          { k: "row", key: "pending-controls", p: { gap: "sm", wrap: true }, c: [
+            ...(pending.text ? [button("restore-send", "Restore text to composer", !!this.currentThread()?.sending || this.busy)] : []),
+            button("abandon-send", "Stop tracking this send…", !!this.currentThread()?.sending || this.busy),
+          ] },
+          ...(this.abandonConfirm === pending.token ? [
+            label(pending.text ? "Only continue after checking this conversation. This does NOT cancel Telegram delivery or declare success; it keeps the text as a draft. Sending that draft later may duplicate a message already delivered." : "Only continue after checking this conversation. This does NOT cancel Telegram delivery or declare success. Your composer draft is unchanged; retrying the media later may duplicate a message already delivered.", "abandon-warning"),
+            { k: "row", key: "abandon-controls", p: { gap: "sm", wrap: true }, c: [
+              button("confirm-abandon-send", pending.text ? "I checked this chat · Keep draft and stop tracking" : "I checked this chat · Stop tracking", !!this.currentThread()?.sending || this.busy),
+              button("cancel-abandon-send", "Keep tracking", !!this.currentThread()?.sending || this.busy),
+            ] } satisfies NativeNode,
+          ] : []),
+        ] }, dock,
+      ] };
     }
-    const controls = [button("submit", COPY[this.stage].submit, this.busy)];
+    const controls = this.stage === "qr" && this.authorizationState !== "ready" && !this.error
+      ? [] : [button("submit", this.stage === "qr" && this.authorizationState === "ready" ? "Retry opening chats" : COPY[this.stage].submit, this.busy)];
     if (this.stage === "logout") controls.push(button("cancel", "Cancel · Esc", this.busy));
-    else if (this.stage === "phone") controls.push(button("credentials", "Change API credentials", this.busy));
-    else if (this.stage === "code" || this.stage === "password") controls.push(button("back", "Back / request new code", this.busy));
+    else if (this.stage === "qr" || this.stage === "password" || this.stage === "closed") controls.push(button("credentials", "Change API credentials", this.busy));
+    if (this.stage === "password") controls.push(button("restart-qr", "Use a different account", this.busy));
     controls.push(button("quit", "Quit"));
     return { k: "col", key: "dock", p: { gap: "sm" }, c: [
       ...this.fields().filter(field => field !== this),
       { k: "row", key: "controls", p: { gap: "sm", wrap: true }, c: controls },
       ...(this.busy ? [{ k: "spinner" as const, key: "busy", p: { label: "Telegram" } }] : []),
       { k: "text", key: "status", p: { text: this.status, tone: this.error ? "error" : "muted", wrap: "word" } },
-      label("Tab: next field · Enter: submit · Ctrl+G: keys · Ctrl+Q: quit", "keys"),
+      label(this.stage === "qr" ? "Codes update automatically · Ctrl+G: keys · Ctrl+Q: quit" : "Tab: next field · Enter: continue · Ctrl+G: keys · Ctrl+Q: quit", "keys"),
     ] };
   }
   describeSurface(): NativeSurface { return { main: [this.body], dock: [this] }; }
@@ -1264,10 +1642,13 @@ export class TerngramApp implements Component {
   async quit(): Promise<void> {
     if (this.quitting) return;
     this.quitting = true;
-    this.clearTransient();
+    for (const request of this.reconcilingSends.values()) clearTimeout(request.timer);
+    this.reconcilingSends.clear();
+    this.authorizationVersion++; this.clearQr(); this.bootstrap = undefined; this.password.setValue(""); this.apiHash.setValue("");
+    this.redraw(); this.clearTransient();
     clearTimeout(this.persistTimer); clearTimeout(this.readerTimer); await this.persist();
     this.avatars.clear(); this.previews.clear(); this.receipts.clear(); this.readers.clear();
-    this.closeHelp(); this.closePalette(); this.closePhoto(); this.closeForwardPicker(); this.apiHash.setValue(""); this.password.setValue(""); this.code.setValue("");
+    this.closeHelp(); this.closePalette(); this.closePhoto(); this.closeForwardPicker();
     await this.telegram.close(); await this.exit();
   }
 }

@@ -13,9 +13,7 @@ export interface Dialog {
 }
 
 export interface DialogCursor {
-  date: number;
-  id: number;
-  peer_id: number;
+  offset: number;
 }
 
 export interface DialogPage {
@@ -39,6 +37,7 @@ export interface ChatMessage {
   grouped_id: string | null;
   sender_id: number | null;
   markdown: string;
+  sending_state?: "queued" | "failed";
 }
 
 export interface PeerPresence {
@@ -47,6 +46,8 @@ export interface PeerPresence {
   was_online?: number;
 }
 export type TelegramUpdate =
+  | { kind: "authorization"; authorization: Authorization }
+  | { kind: "send_state"; chat_id: number; token: string; status: "queued" | "failed" | "uncertain" | "sent" | "abandoned"; admitted?: boolean; message_id?: number; error?: string; message?: ChatMessage }
   | { kind: "presence"; chat_id: number; presence: PeerPresence }
   | { kind: "typing"; chat_id: number; sender_id: number; sender: string; action: string; expires_in: number }
   | { kind: "message"; chat_id: number; message: ChatMessage }
@@ -58,7 +59,11 @@ export type TelegramUpdate =
 export interface PendingSend {
   text: string;
   reply_to: number | null;
-  random_id: string;
+  token: string;
+  chat_id: number;
+  message_id?: number;
+  status: "queued" | "failed" | "uncertain";
+  error?: string;
 }
 
 export interface ClientState {
@@ -72,6 +77,24 @@ export interface Photo {
   mime: string;
   width: number;
   height: number;
+}
+
+export interface Authorization {
+  state: "credentials" | "qr" | "password" | "ready" | "closed";
+  qr?: Photo;
+  hint?: string;
+}
+
+/** TDLib uses int53 identifiers, not legacy MTProto's 32-bit message IDs. */
+function validateIds(value: unknown): void {
+  if (!value || typeof value !== "object") return;
+  for (const [key, item] of Object.entries(value)) {
+    if (["id", "chat_id", "sender_id", "reply_to", "last_message_id", "max_id", "selected_id", "message_id"].includes(key) && item !== null && (typeof item !== "number" || !Number.isSafeInteger(item)))
+      throw new Error("TDLib returned an invalid or unsafe identifier.");
+    if (key === "ids" && (!Array.isArray(item) || item.some(id => !Number.isSafeInteger(id))))
+      throw new Error("TDLib returned invalid or unsafe message identifiers.");
+    if (typeof item === "object") validateIds(item);
+  }
 }
 
 export class TelegramRequestError extends Error {
@@ -122,11 +145,13 @@ export class Telegram {
         buffered += decoder.decode(bytes, { stream: true });
         let newline: number;
         while ((newline = buffered.indexOf("\n")) !== -1) {
+          if (this.stopped) return;
           const line = buffered.slice(0, newline);
           buffered = buffered.slice(newline + 1);
           const message = JSON.parse(line);
           if (message.event === "update") {
             const { event: _event, ...update } = message;
+            validateIds(update);
             this.onUpdate?.(update as TelegramUpdate);
             continue;
           }
@@ -142,7 +167,10 @@ export class Telegram {
             this.cooldowns.block(request.method, request.peer, retryAfter, message.retry_scope === "peer" ? "peer" : "method");
             request.reject(new TelegramRequestError(request.method, `${typeof message.error_code === "string" ? `[${message.error_code}] ` : ""}${message.error}`, retryAfter));
           }
-          else request.resolve(message.result);
+          else {
+            try { validateIds(message.result); request.resolve(message.result); }
+            catch (error) { request.reject(new TelegramRequestError(request.method, error instanceof Error ? error.message : String(error))); }
+          }
         }
       }
       if (!this.stopped) this.fail("The local Telegram connection ended. Reconnect to continue.");

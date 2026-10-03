@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import inspect
 import json
+import os
 import sys
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -11,11 +12,12 @@ from pathlib import Path
 from .telegram import ClientError, TelegramService, retry_after, retry_scope
 
 METHODS = frozenset((
-    "has_credentials", "connect", "request_code", "sign_in_code", "sign_in_password",
+    "has_credentials", "connect", "auth_state", "request_qr", "sign_in_password",
     "me", "dialogs", "dialog", "chat_info", "message_readers", "history", "album", "send", "edit", "delete", "forward", "mark_read",
+    "prepare_send", "adopt_failed_send", "retry_send", "reconcile_send", "abandon_send",
     "photo", "avatar", "load_state", "save_state", "logout", "close", "select_peer", "typing", "activity",
 ))
-AUTH_METHODS = frozenset(("connect", "request_code", "sign_in_code", "sign_in_password", "logout", "close"))
+AUTH_METHODS = frozenset(("connect", "request_qr", "sign_in_password", "logout", "close"))
 
 
 def emit(value) -> None:
@@ -113,6 +115,7 @@ async def serve(data_dir: Path) -> None:
 
 
 def main() -> None:
+    os.umask(0o077)
     parser = argparse.ArgumentParser(description="Private terngram worker, launched by the native UI.")
     parser.add_argument("--data-dir", type=Path, required=True)
     args = parser.parse_args()

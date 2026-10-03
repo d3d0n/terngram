@@ -10,6 +10,7 @@ export class MessageView {
 
   describe(members: readonly ChatMessage[], context: { thread: ChatState; selectedMessageId: number | null; loading: boolean; readerCount?: number | null; peerNames?: ReadonlyMap<number, string>; avatar: NativeNode | null | undefined; previews: readonly (NativeNode | null | undefined)[] }): NativeNode {
     const message = members[0]!;
+    const failed = members.find(item => item.sending_state === "failed");
     const key = message.grouped_id === null ? `message-${message.chat_id}-${message.id}` : `album-${message.chat_id}-${message.grouped_id}`;
     const reply = message.reply_to === null ? undefined : context.thread.getMessage(message.reply_to);
     const selected = members.some(item => item.id === context.selectedMessageId);
@@ -22,10 +23,13 @@ export class MessageView {
     const photos = members.filter(item => item.photo);
     const captions = members.filter(item => !item.photo || item.text !== "[Photo]");
     const thumbnails = previews.filter((node): node is NativeNode => node != null);
+    const delivery = members.some(item => item.sending_state === "failed") ? " · not sent"
+      : members.some(item => item.sending_state === "queued") ? " · sending…"
+      : readerCount != null ? ` · read ${readerCount}` : members.every(item => item.read) ? " · read" : " · sent";
     const card: NativeNode = { k: "card", key: "bubble", p: {
-      role: "terngram.message", tone: message.outgoing ? "user" : "neutral", selected, grow: 1, shrink: 1, basis: 0, min: { w: 0 }, max: { w: 1 },
-      head: [{ t: senderName, s: "strong" }, { t: `  ${message.time}${members.some(item => item.edited) ? " · edited" : ""}${message.outgoing ? readerCount != null ? ` · read ${readerCount}` : members.every(item => item.read) ? " · read" : " · sent" : ""}`, s: "muted" }],
-      title: "Click for message actions · double-click to reply", actions: { click: `message:${message.id}`, dblclick: `reply-message:${message.id}` },
+      role: "terngram.message", tone: failed ? "error" : message.outgoing ? "user" : "neutral", status: failed ? "error" : undefined, selected, grow: 1, shrink: 1, basis: 0, min: { w: 0 }, max: { w: 1 },
+      head: [{ t: senderName, s: "strong" }, { t: `  ${message.time}${members.some(item => item.edited) ? " · edited" : ""}${message.outgoing ? delivery : ""}`, s: "muted" }],
+      title: failed ? "Message not sent · Click for Retry actions" : "Click for message actions · double-click to reply", actions: { click: `message:${failed?.id ?? message.id}`, dblclick: failed ? `retry-message:${failed.id}` : `reply-message:${message.id}` },
     }, c: [
       ...(message.forwarded ? [label(`Forwarded from ${message.forwarded}`, "forwarded")] : []),
       ...(message.reply_to !== null ? [label(reply ? `↳ ${replyName}: ${preview(reply.text)}` : `↳ Reply to message #${message.reply_to}`, "reply")] : []),
@@ -38,7 +42,13 @@ export class MessageView {
     const tone = (["accent", "info", "warning", "muted"] as const)[Math.abs(message.sender_id ?? 0) % 4]!;
     const node: NativeNode = { k: "row", key, p: { align: "start", gap: "sm", shrink: 1, min: { w: 0 }, max: { w: 1 } }, c: [
       { k: "col", key: "portrait", p: { min: { w: "4ch", h: "2lines" }, max: { w: "4ch" }, grow: 0, shrink: 0 }, c: [
-        avatar ?? { k: "badge", key: "initials", p: { text: initials, tone, aria: senderName, title: senderName } },
+        avatar ?? { k: "card", key: "initials", p: { tone, aria: senderName, title: senderName, min: { w: "4ch", h: "2lines" }, max: { w: "4ch", h: "2lines" }, grow: 0, shrink: 0 }, c: [
+          { k: "row", p: { align: "center", grow: 1 }, c: [
+            { k: "spacer", p: { grow: 1 } },
+            { k: "text", p: { text: initials, wrap: "none", shrink: 0 } },
+            { k: "spacer", p: { grow: 1 } },
+          ] },
+        ] },
         // Added under the portrait on selection: reveals the message without replacing its stable identity or adding a blank line in the card.
         ...(selected ? [{ k: "text", key: "selection-anchor", reveal: "nearest", p: { text: "" } } satisfies NativeNode] : []),
       ] },

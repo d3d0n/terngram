@@ -7,7 +7,7 @@ name = "terngram"
 version = "0.1.0"
 description = "A native Telegram client for Tern"
 requires-python = ">=3.12"
-dependencies = ["telethon>=1.40,<2"]
+dependencies = ["qrcode[pil]>=8.2,<9"]
 
 [project.scripts]
 terngram = "terngram.__main__:main"

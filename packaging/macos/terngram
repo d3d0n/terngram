@@ -1,0 +1,19 @@
+#!/bin/sh
+# Use package-relative runtimes; neither the checkout nor Homebrew is needed.
+set -eu
+ROOT=$(CDPATH= cd -- "$(/usr/bin/dirname -- "$0")/.." && pwd -P)
+export PYTHONHOME="$ROOT/runtime/python"
+export PYTHONPATH="$ROOT/app"
+export PYTHONNOUSERSITE=1
+export PYTHONDONTWRITEBYTECODE=1
+export TERNGRAM_TDLIB_LIBRARY="$ROOT/runtime/lib/libtdjson.dylib"
+export PATH="$ROOT/runtime/bin:$ROOT/runtime/python/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# Do not let the caller's Python/dynamic-loader overrides replace bundled code.
+unset PYTHONSTARTUP PYTHONUSERBASE PYTHONPLATLIBDIR PYTHONSAFEPATH
+unset DYLD_FALLBACK_LIBRARY_PATH DYLD_FALLBACK_FRAMEWORK_PATH DYLD_INSERT_LIBRARIES
+unset PYTHONEXECUTABLE
+export DYLD_LIBRARY_PATH="$ROOT/runtime/lib:$ROOT/runtime/python/lib"
+export DYLD_FRAMEWORK_PATH="$ROOT/runtime/lib"
+unset __PYVENV_LAUNCHER__
+cd -- "$ROOT/app"
+exec "$ROOT/runtime/python/bin/python3" -P -s -m terngram "$@"
