@@ -13,5 +13,8 @@
   "devDependencies": {
     "@types/bun": "^1.3.0",
     "typescript": "^5.9.0"
+  },
+  "patchedDependencies": {
+    "@oh-my-pi/pi-tui@18.4.9": "patches/@oh-my-pi%2Fpi-tui@18.4.9.patch"
   }
 }

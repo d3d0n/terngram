@@ -48,6 +48,7 @@ PROJECT_FILES = (
     'terngram/ui/reader-counts.ts', 'terngram/ui/request-cooldowns.ts',
     'terngram/ui/shortcut-help.ts', 'terngram/ui/telegram.ts',
     'pyproject.toml', 'package.json', 'bun.lock',
+    'patches/@oh-my-pi%2Fpi-tui@18.4.9.patch',
 )
 
 

@@ -1,0 +1,30 @@
+diff --git a/src/native/backend.ts b/src/native/backend.ts
+index bbc5c45f76dba8d27314504195bb09ec5f17e1bc..41f0d6c2f78dc59c5e9ac47f762c3ad11dab6238 100644
+--- a/src/native/backend.ts
++++ b/src/native/backend.ts
+@@ -185,7 +185,8 @@ class Surface {
+ 	/** Send times of unacknowledged frames, oldest first. */
+ 	unacked: number[] = [];
+ 	uploaded = new Set<string>();
+-	focus: string | null = null;
++	// Undefined forces the current component's focus to be reasserted after tab return.
++	focus: string | null | undefined = null;
+ 	dirty = false;
+ 
+ 	constructor(id: string, mode: "inline" | "screen", role: string, mirror: boolean) {
+@@ -650,8 +651,14 @@ export class NativeBackend {
+ 				this.#cx.reduceMotion = event.reduce;
+ 				this.#host.motionChanged(event.reduce);
+ 				return;
+-			case "visible":
++			case "visible": {
++				const surface = this.#surfaceFor(event.sf);
++				if (surface && event.visible) {
++					surface.focus = undefined;
++					this.#host.requestRender();
++				}
+ 				return;
++			}
+ 			case "error":
+ 				logger.warn("TSP: terminal reported an error", event);
+ 				return;
