@@ -13,7 +13,7 @@ Paths below are relative to `terngram/ui/`.
 | Chronological history, revisions, albums, drafts, reply/edit snapshots | [chat-state.ts](../terngram/ui/chat-state.ts) |
 | Back/Forward, five recent chats, double-arrow recognition | [chat-navigation.ts](../terngram/ui/chat-navigation.ts) |
 | Conversation status versus composer context | [chat-dock.ts](../terngram/ui/chat-dock.ts) |
-| Stable message cards, Markdown, avatars and preview descriptions | [message-view.ts](../terngram/ui/message-view.ts) |
+| Stable message cards, literal entity-formatted text, avatars and preview descriptions | [message-view.ts](../terngram/ui/message-view.ts) |
 | Palette and writable forwarding destinations | [command-palette.ts](../terngram/ui/command-palette.ts), [forward-picker.ts](../terngram/ui/forward-picker.ts) |
 | Full-photo selection, captions and album navigation | [photo-viewer.ts](../terngram/ui/photo-viewer.ts) |
 | Background image deduplication and bounded concurrency | [image-loader.ts](../terngram/ui/image-loader.ts) |
@@ -99,6 +99,8 @@ Without an overlay, Esc cancels a pending gallery opening first, then deletion c
 ## Draft, edit and pending-send transitions
 
 Opening a chat immediately selects it, restores its draft/focus, schedules persistence and decorations; history is awaited only if not yet loaded. Reply preserves draft text. Edit snapshots the original draft/reply target and uses the message's Markdown; cancel restores that snapshot. A successful edit restores it only if the user has not changed the buffer/mode meanwhile. Delete updates clear removed reply/edit targets. Albums are one selection unit; a missing reply target displays its message number.
+
+Message bodies and captions use native text spans derived from Telegram entities, with separate native code blocks for preformatted ranges. The renderer preserves literal parentheses, brackets, dollars, backslashes and URL text rather than passing compose syntax through Tern's Markdown/LaTeX parser. Bold, italic, strike, inline code and link targets remain semantic formatting. Invalid UTF-16 ranges, including mid-surrogate offsets, do not split the original text. The message's `markdown` field remains editable compose syntax; it is never drawn as the message body.
 
 A new send follows **prepare → persist client pending → submit → confirmed outcome**, never an optimistic success card. `prepare_send` allocates a durable local intent before UI persistence; a persistence failure blocks `send`. A queued TDLib message remains awaiting confirmation, not sent. Live events and RPC replies pass through the same ID-deduplicated receive path. Confirmation can replace a local message ID with the server ID and clears only matching pending text/reply, never newer user input. A successful new send in the selected chat goes to latest; editing is not a new send.
 

@@ -119,7 +119,7 @@ const client = new TerngramApp(nativeUi, python, directory, process.cwd(), async
 const app = client as unknown as SmokeClient;
 const actualCall = app.telegram.call.bind(app.telegram);
 const message = (id: number, chat_id: number, text: string, outgoing = false): ChatMessage => ({
-  id, chat_id, text, markdown: text, sender_id: outgoing ? 1001 : 1002, outgoing, sender: outgoing ? "You" : "Alice", time: "2026-10-03 12:00", reply_to: null, edited: false, photo: false, media_id: null, forwarded: null, read: false, grouped_id: null,
+  id, chat_id, text, markdown: text, entities: [], sender_id: outgoing ? 1001 : 1002, outgoing, sender: outgoing ? "You" : "Alice", time: "2026-10-03 12:00", reply_to: null, edited: false, photo: false, media_id: null, forwarded: null, read: false, grouped_id: null,
 });
 const dialog = (id: number, title: string): Dialog => ({ id, title, kind: "user", unread_count: 0, preview: "Initial", writable: true, last_message_id: 10 });
 const { promise: sendResult, resolve: releaseSend } = Promise.withResolvers<ChatMessage>();
@@ -420,8 +420,22 @@ try {
   await app.refresh(); draw();
   assert(snapshot().some(node => node.p?.text?.includes("43 members")), "refresh updates participant count without losing selected chat");
   assert(!snapshot().some(node => node.k === "list"), "chat navigation must not occupy the persistent dock");
+  const chatSurface = frames.at(-1)!.sf;
+  const chatDocument = documents.get(chatSurface)!;
+  const editorFocus = chatDocument.focus;
+  assert(editorFocus && chatDocument.get(editorFocus)?.k === "editor");
+  backend.handleInput(encodeTspJson("e", { ev: "visible", sf: chatSurface, visible: false }));
+  // Model the host dropping native focus while the tab's surface is detached.
+  assert.deepEqual(chatDocument.applyFrame({ sf: chatSurface, s: frames.at(-1)!.s, ops: [["focus", null]] }), []);
+  backend.handleInput(encodeTspJson("e", { ev: "visible", sf: chatSurface, visible: true }));
+  draw();
+  assert.equal(chatDocument.focus, editorFocus, "returning to the tab restores the existing native editor focus");
   app.intercept("\x0b"); draw();
   assert(snapshot().some(node => node.k === "picker"), "Ctrl+K opens the native command palette");
+  backend.handleInput(encodeTspJson("e", { ev: "visible", sf: chatSurface, visible: true }));
+  draw();
+  assert.equal(chatDocument.focus, null, "tab return with a palette open must not focus the underlying editor");
+  assert.equal(focus, overlays.at(-1)!.component, "tab return retains palette keyboard ownership");
   overlays.at(-1)!.component.handleInput!("\x1b");
   assert.equal(focus, app.composer, "Escape restores editor focus");
   const typingCalls = () => rpcCalls.filter(call => call.method === "typing");
@@ -565,7 +579,7 @@ try {
   const beforeIncoming = frames.length;
   app.telegram.onUpdate!({ kind: "message", chat_id: 1, message: message(11, 1, "Live while send is pending") });
   draw();
-  assert(snapshot().some(node => node.p?.text === "Live while send is pending"), "live event renders during pending send/history");
+  assert(snapshot().some(node => node.k === "text" && node.p?.spans?.map(span => span.t).join("") === "Live while send is pending"), "live event renders during pending send/history");
   assert(snapshot().some(node => JSON.stringify(node.p?.label ?? "").includes("1 new")));
   assert(!snapshot().some(node => node.p?.text?.includes("Alice · typing")), "a peer message clears that sender's typing indicator");
   assert(!frames.slice(beforeIncoming).flatMap(frame => frame.ops).some(op => op[0] === "scroll" || op[0] === "reveal"), "incoming event must not force a user out of history");
@@ -662,7 +676,7 @@ try {
   await Bun.sleep(0);
   action("chat:2"); draw();
   assert.equal(app.composer.getText(), "Bob draft");
-  assert(snapshot().some(node => node.p?.text === "Bob history"));
+  assert(snapshot().some(node => node.k === "text" && node.p?.spans?.map(span => span.t).join("") === "Bob history"));
   action("chat:1"); app.intercept("\x0c"); draw();
   assert(frames.at(-1)!.ops.some(op => op[0] === "scroll" && op[2] === "end"));
   action("bottom"); draw();
@@ -699,9 +713,13 @@ try {
   });
   assert.equal(photoRequests.filter(args => args[1] === 14).length, oldPhotoCalls + 2, "replaced media fetches both a new preview and new full image");
   app.closePhoto();
-  const formatted = { ...message(16, 1, "Bold and code"), markdown: "**Bold** and `code`" };
+  const formatted = { ...message(16, 1, "Bold and code"), markdown: "**Bold** and `code`", entities: [
+    { offset: 0, length: 4, type: { "@type": "textEntityTypeBold" } },
+    { offset: 9, length: 4, type: { "@type": "textEntityTypeCode" } },
+  ] };
   app.telegram.onUpdate!({ kind: "message", chat_id: 1, message: formatted }); draw();
-  assert(snapshot().some(node => node.k === "md" && node.p?.text === formatted.markdown), "Telegram formatting uses native Markdown rendering");
+  assert(snapshot().some(node => node.k === "text" && node.p?.spans?.some(span => span.t === "Bold" && span.s === "strong")
+    && node.p.spans.some(span => span.t === "code" && span.s === "code")), "Telegram entities preserve native bold and code without Markdown parsing");
   app.dialogCursor = { offset: 60 };
   await app.moreChats();
   assert.deepEqual(app.dialogs.map(item => item.id), [1, 2, 3]);
@@ -719,7 +737,7 @@ try {
   await Bun.sleep(0);
   assert.equal(app.selectedId, app.dialogs[70]!.id, "palette navigation reaches chats beyond its viewport");
   await app.selectChat(1); draw();
-  assert(snapshot().some(node => node.k === "md" && node.p?.text === oldest.markdown), "switching through palette preserves loaded transcript");
+  assert(snapshot().some(node => node.k === "text" && node.p?.spans?.map(span => span.t).join("") === oldest.text), "switching through palette preserves loaded transcript");
   app.composer.setText("Retry safely");
   const beforeFailedSave = sendAttempts.length;
   failNextSave = true;
@@ -786,7 +804,7 @@ try {
   const failedCardId = failedCard.id;
   const messageOrder = () => snapshot().filter(node => node.p?.role === "terngram.message").map(node => node.id);
   const failedOrder = messageOrder();
-  assert.equal(snapshot().filter(node => node.p?.role === "terngram.message" && nodes(node).some(child => child.p?.text === "Retry safely")).length, 1, "failed delivery has no duplicate transcript card");
+  assert.equal(snapshot().filter(node => node.p?.role === "terngram.message" && nodes(node).some(child => child.k === "text" && child.p?.spans?.map(span => span.t).join("") === "Retry safely")).length, 1, "failed delivery has no duplicate transcript card");
   action(`message:${failedMessageId}`); draw();
   assert(snapshot().some(node => node.p?.actions?.click === `retry-message:${failedMessageId}`), "selecting the failed message exposes explicit Retry");
   const failedPalette = sendPalette();

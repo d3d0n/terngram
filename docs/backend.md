@@ -75,7 +75,7 @@ The declarations live in `ui/telegram.ts`; Python dataclasses/serializers produc
 | `Dialog` | `id:number`, `title:string`, `unread_count:number`, `preview:string`, `writable:boolean`, `last_message_id:number\|null`, `kind:"user"\|"bot"\|"group"\|"channel"\|"saved"`, `presence?:PeerPresence\|null` (Python emits it, including null) |
 | `DialogCursor` | `{offset:number}` |
 | `DialogPage` | `{dialogs:Dialog[], cursor:DialogCursor\|null}` |
-| `ChatMessage` | `id:number`, `chat_id:number`, `sender:string`, `text:string`, `time:string`, `outgoing:boolean`, `reply_to:number\|null`, `edited:boolean`, `photo:boolean`, `media_id:string\|null`, `forwarded:string\|null`, `read:boolean`, `grouped_id:string\|null`, `sender_id:number\|null`, `markdown:string`, `sending_state` as described below |
+| `ChatMessage` | `id:number`, `chat_id:number`, `sender:string`, `text:string`, `time:string`, `outgoing:boolean`, `reply_to:number\|null`, `edited:boolean`, `photo:boolean`, `media_id:string\|null`, `forwarded:string\|null`, `read:boolean`, `grouped_id:string\|null`, `sender_id:number\|null`, `markdown:string`, `entities:MessageEntity[]`, `sending_state` as described below |
 | `PeerPresence` | `state:"online"\|"offline"\|"recently"\|"last_week"\|"last_month"\|"unknown"`, `expires?:number`, `was_online?:number`; times are epoch seconds |
 | `Photo` | `{data:string, mime:string, width:number, height:number}`; data is base64, not a path or URL |
 | `Authorization` | `{state:"credentials"\|"qr"\|"password"\|"ready"\|"closed", qr?:Photo, hint?:string}`; no separate login-link URL |
@@ -83,13 +83,13 @@ The declarations live in `ui/telegram.ts`; Python dataclasses/serializers produc
 | `ClientState` | `{drafts:Record<string,string>, selected_id:number\|null, pending_sends:Record<string,PendingSend>}`; map keys are decimal chat IDs, one tracked pending per chat |
 | Reconciliation record | Active record: `token`, `chat_id`, `status`, `admitted:boolean`, `text`, `reply_to`, optional `message_id`/safe `error`. Terminal record: only `token`, `chat_id`, `status:"sent"\|"abandoned"`, optional `message_id`, and `admitted` |
 
-**Current declaration difference:** TypeScript declares `sending_state?:"queued"|"failed"`, but Python's dataclass always emits the key and uses `null` for confirmed messages. Consumers currently treat a falsy value as no sending state. When changing DTOs, align the declaration with this wire behavior rather than documenting null away. State validation strips `PendingSend.error` before persistence/return; live safe errors may still be supplied in events and reconciliation records.
+Python always emits `sending_state` and uses `null` for confirmed messages; TypeScript accepts that nullable value. Consumers treat a falsy value as no sending state. State validation strips `PendingSend.error` before persistence/return; live safe errors may still be supplied in events and reconciliation records.
 
 Adopted captionless native media may have `PendingSend.text:""`; saved state requires a valid `message_id` for that empty-text case. It is not an empty composer send or a synthesized `[Photo]` draft.
 
 Chat IDs are nonzero signed safe JS integers (`abs(id) <= 2^53-1`). Message/reply IDs are positive TDLib `int53`, not old 32-bit message IDs. A local outgoing message ID is not itself a server confirmation. Frontend recursively checks named ID fields and `ids` arrays for safe integers. Album `grouped_id` is a decimal **string** because TDLib album IDs are int64; `media_id` is also a string. Tokens are canonical positive decimal strings from `1` through `2^31-1`, with no leading zero, and become native `sending_id` integers.
 
-`ChatMessage.time` is local `YYYY-MM-DD HH:MM` display text, not a sortable server timestamp. `text` is plain content/caption or a readable unsupported/restricted-content label; `markdown` is display Markdown reconstructed from entities. Reply references are exposed only for the same chat. `read` derives from the appropriate native inbox/outbox maximum and is false while sending. Sender chat identities use negative `sender_id`; user identities use positive IDs.
+`ChatMessage.time` is local `YYYY-MM-DD HH:MM` display text, not a sortable server timestamp. `text` is plain content/caption or a readable unsupported/restricted-content label. `entities` carries TDLib UTF-16 ranges and entity types for native literal text runs and code blocks; ordinary punctuation, URLs and LaTeX-looking text are never reparsed as Markdown. `markdown` is reconstructed **compose syntax for editing and send recovery only**, not display input. Reply references are exposed only for the same chat. `read` derives from the appropriate native inbox/outbox maximum and is false while sending. Sender chat identities use negative `sender_id`; user identities use positive IDs.
 
 ### Events
 

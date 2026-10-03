@@ -164,7 +164,7 @@ test("reader cache bounds retained messages without evicting requests in flight"
 });
 
 function message(outgoing: boolean, read: boolean): ChatMessage {
-  return { id: 9, chat_id: 1, sender: "Alice", sender_id: 42, text: "Hello", markdown: "Hello",
+  return { id: 9, chat_id: 1, sender: "Alice", sender_id: 42, text: "Hello", markdown: "Hello", entities: [],
     time: "12:00", outgoing, read, reply_to: null, edited: false, photo: false, media_id: null,
     forwarded: null, grouped_id: null };
 }

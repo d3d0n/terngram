@@ -32,7 +32,7 @@ TSP is the terminal-facing protocol. JSONL is the private UI-to-worker protocol.
 | Worker dispatcher | [`worker.py`](../terngram/worker.py) | Method allowlist, request admission, event envelopes, EOF and safe diagnostics |
 | Telegram service | [`telegram.py`](../terngram/telegram.py) | TDLib translation, chat/message caches, media access and durable intent state |
 | Native binding | [`tdlib.py`](../terngram/tdlib.py) | Library discovery, version gate, receive ownership, responses, ordered updates and close |
-| Formatting | [`formatting.py`](../terngram/formatting.py) | Compose Markdown, TDLib entities and literal-safe display Markdown using UTF-16 offsets |
+| Formatting | [`formatting.py`](../terngram/formatting.py) | Compose Markdown ↔ TDLib entities using UTF-16 offsets; received entities render as literal native text/code in the UI |
 
 The source map is deliberately small. Detailed contracts live in [backend.md](backend.md), [ui.md](ui.md) and [tern-api.md](tern-api.md), not in this entry guide.
 
@@ -73,7 +73,7 @@ Use `TERNGRAM_TDLIB_LIBRARY` to select a specific compatible native library. The
 | Images, albums or avatars | Service media/permission/path checks, [`image-loader.ts`](../terngram/ui/image-loader.ts), [`photo-viewer.ts`](../terngram/ui/photo-viewer.ts), app/view caches | Image/viewer tests, service media tests, native smoke |
 | Read decisions or viewer counts | [`read-receipts.ts`](../terngram/ui/read-receipts.ts), [`reader-counts.ts`](../terngram/ui/reader-counts.ts), app policy and service calls | Read/viewer tests, service tests, native read-race smoke |
 | Typing, presence or rate limits | Service activity, app transient state, [`request-cooldowns.ts`](../terngram/ui/request-cooldowns.ts), UI transport | [`test_activity.py`](../tests/test_activity.py), cooldown tests, native smoke |
-| Markdown/entities | `formatting.py`, service message conversion and composition | [`test_formatting.py`](../tests/test_formatting.py), native formatted-message smoke |
+| Markdown/entities | `formatting.py`, service message conversion, `ui/message-view.ts` and paired DTOs | [`test_formatting.py`](../tests/test_formatting.py), [`message-view.test.ts`](../tests/message-view.test.ts), native formatted-message smoke |
 | Private files or migration | Service private-file helpers, state validation, outbox recovery, worker umask | Service filesystem/migration tests; update [security.md](security.md) |
 
 ## Verification

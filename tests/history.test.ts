@@ -3,7 +3,7 @@ import { ChatState, mergeHistory, messageGroups } from "../terngram/ui/chat-stat
 import type { ChatMessage } from "../terngram/ui/telegram";
 
 function message(id: number, text: string): ChatMessage {
-  return { id, chat_id: 123, sender: "Alice", sender_id: 42, text, markdown: text, time: "2026-10-03 12:00", outgoing: false, reply_to: null, edited: false, photo: false, media_id: null, forwarded: null, read: false, grouped_id: null };
+  return { id, chat_id: 123, sender: "Alice", sender_id: 42, text, markdown: text, entities: [], time: "2026-10-03 12:00", outgoing: false, reply_to: null, edited: false, photo: false, media_id: null, forwarded: null, read: false, grouped_id: null };
 }
 
 test("overlapping history pages keep chronological order and replace edited messages", () => {

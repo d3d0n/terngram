@@ -21,6 +21,12 @@ export interface DialogPage {
   cursor: DialogCursor | null;
 }
 
+export interface MessageEntity {
+  offset: number;
+  length: number;
+  type: { "@type": string; url?: string; user_id?: number; language?: string };
+}
+
 export interface ChatMessage {
   id: number;
   chat_id: number;
@@ -37,7 +43,8 @@ export interface ChatMessage {
   grouped_id: string | null;
   sender_id: number | null;
   markdown: string;
-  sending_state?: "queued" | "failed";
+  entities: MessageEntity[];
+  sending_state?: "queued" | "failed" | null;
 }
 
 export interface PeerPresence {

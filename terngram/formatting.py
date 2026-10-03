@@ -129,8 +129,8 @@ def parse_markdown(text: str) -> tuple[str, list[dict]]:
     return plain, entities
 
 
-def display_markdown(text: str, entities: list[dict] | None) -> str:
-    """Render real TDLib formatting; unknown/invalid entities stay literal-safe."""
+def compose_markdown(text: str, entities: list[dict] | None) -> str:
+    """Reconstruct editable compose syntax, never input for a Markdown renderer."""
     # Mapping only whole Unicode characters also rejects mid-surrogate ranges.
     positions, offset = {0: 0}, 0
     for index, character in enumerate(text):

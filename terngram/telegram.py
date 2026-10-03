@@ -23,7 +23,7 @@ from time import monotonic
 import qrcode
 from PIL import Image
 
-from .formatting import display_markdown, parse_markdown
+from .formatting import compose_markdown, parse_markdown
 from .tdlib import TDLib, TDLibError
 
 
@@ -65,6 +65,7 @@ class ChatMessage:
     grouped_id: str | None
     sender_id: int | None
     markdown: str
+    entities: list[dict]
     media_id: str | None
     sending_state: str | None = None
 
@@ -166,7 +167,7 @@ def _content_text(content: dict | None) -> tuple[str, list]:
     if isinstance(formatted, dict):
         text = formatted.get("text", "")
         if text:
-            return text, formatted.get("entities", [])
+            return text, formatted.get("entities") or []
     kind = content.get("@type", "messageUnsupported").removeprefix("message")
     return "[" + re.sub(r"(?<!^)(?=[A-Z])", " ", kind) + "]", []
 
@@ -839,7 +840,7 @@ class TelegramService:
             return await self._message(current)
         sending = message.get("sending_state") or {}
         sending_state = "failed" if sending.get("@type") == "messageSendingStateFailed" else "queued" if sending else None
-        return ChatMessage(message["id"], chat_id, "You" if outgoing else sender, text, datetime.fromtimestamp(message.get("date", 0)).astimezone().strftime("%Y-%m-%d %H:%M"), outgoing, reply_id, bool(message.get("edit_date")), media is not None, forwarded, not sending and message["id"] <= maximum, str(message["media_album_id"]) if int(message.get("media_album_id", 0)) else None, sender_id, display_markdown(text, entities), media_id, sending_state)
+        return ChatMessage(message["id"], chat_id, "You" if outgoing else sender, text, datetime.fromtimestamp(message.get("date", 0)).astimezone().strftime("%Y-%m-%d %H:%M"), outgoing, reply_id, bool(message.get("edit_date")), media is not None, forwarded, not sending and message["id"] <= maximum, str(message["media_album_id"]) if int(message.get("media_album_id", 0)) else None, sender_id, compose_markdown(text, entities), entities, media_id, sending_state)
 
     def _remember(self, message: dict, version: int | None = None) -> dict | None:
         key = message["chat_id"], message["id"]
@@ -1151,7 +1152,7 @@ class TelegramService:
                 return {field: matching[field] for field in ("token", "chat_id", "text", "reply_to", "status", "message_id") if field in matching}
             content = _visible_content(message) or {}
             formatted = content.get("text") or content.get("caption") or {}
-            text = display_markdown(formatted.get("text", ""), formatted.get("entities", []))
+            text = compose_markdown(formatted.get("text", ""), formatted.get("entities", []))
             if text:
                 self._compose(text)
             reply = message.get("reply_to") or {}

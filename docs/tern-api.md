@@ -13,7 +13,7 @@ For app policies use [ui.md](ui.md); for the separate Python JSONL/TDLib transpo
 | Launch/hello and surface title/role | [main.ts](../terngram/ui/main.ts) |
 | Plugin tab launch and shell quoting | [window.luau](../packaging/tern/window.luau), [runtime bootstrap](../scripts/launch_release.sh) |
 | Frame provider, focus, native actions and overlay orchestration | [app.ts](../terngram/ui/app.ts) |
-| Message identity, Markdown, portraits and preview nodes | [message-view.ts](../terngram/ui/message-view.ts) |
+| Message identity, literal text/entity formatting, portraits and preview nodes | [message-view.ts](../terngram/ui/message-view.ts) |
 | Dock roles and composer order | [chat-dock.ts](../terngram/ui/chat-dock.ts) |
 | Native picker query/caret/filter/selection | [command-palette.ts](../terngram/ui/command-palette.ts), [forward-picker.ts](../terngram/ui/forward-picker.ts) |
 | Full-photo overlay and stable selection | [photo-viewer.ts](../terngram/ui/photo-viewer.ts) |
@@ -97,6 +97,8 @@ These limits do not make native geometry impossible: the app can describe bounds
 
 TUI keyboard focus belongs to a component through `setFocus`, not a result string. Pointer wire `focus` identifies a node; the backend finds owners/field and calls `focusFromPointer`, allowing a modal overlay to retain keyboard focus. It does not deliver `focus` as an ordinary `NativeUiEvent`.
 
+The pinned SDK carries a Bun patch in `patches/` that invalidates its native focus cache on `visible=true` and requests a frame. Returning to a Tern tab therefore reasserts the current component's focus even when the tree and target ID are unchanged. It preserves editor text/caret and overlay ownership; a palette retains the keys rather than focusing the underlying editor. This is surface-focus recovery, not an app foreground/read signal. `bun install --frozen-lockfile` applies the patch, and release packaging includes it with the installed runtime.
+
 | Component event | Application meaning |
 | --- | --- |
 | `toggle` | Persist requested collapsed state |
@@ -141,7 +143,7 @@ function thread(children: NativeNode[], n: number): NativeNode {
 
 Ctrl+U/D requests viewport movement only with messages focused. Loading older messages is a separate backend history operation. Latest explicitly follows end and updates read state; incoming events do not forcibly reveal latest. `ansi.follow` belongs to ANSI blocks, not `col/md` transcripts.
 
-**No app-visible actual scroll offset, visible-message enumeration or pane foreground callback is established.** Wire `visible` describes surface visibility, not message viewport or keyboard/pane focus, and this backend ignores it. Resize carries cols/cell/visible, but backend only updates cols. `gone` represents missing tree IDs, not messages scrolled offscreen. Theme/motion update appearance; errors are logged warnings, not necessarily component exceptions. The existence of `NativeTerminalEvent` types does not mean all terminal events reach component handlers. Thus ACK, scroll request, mirror state and lack of a visibility callback are not proofs of reading or painted geometry.
+**No app-visible actual scroll offset, visible-message enumeration or pane foreground callback is established.** Wire `visible` describes surface visibility, not message viewport or keyboard/pane focus; the patched backend uses `visible=true` only to reassert native focus, without notifying app activity/read policy. Resize carries cols/cell/visible, but backend only updates cols. `gone` represents missing tree IDs, not messages scrolled offscreen. Theme/motion update appearance; errors are logged warnings, not necessarily component exceptions. The existence of `NativeTerminalEvent` types does not mean all terminal events reach component handlers. Thus ACK, scroll request, mirror state and lack of a visibility callback are not proofs of reading or painted geometry.
 
 ## Image blobs and sensitive lifecycle
 
