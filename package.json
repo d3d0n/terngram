@@ -1,0 +1,17 @@
+{
+  "name": "terngram",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "uv run terngram",
+    "check": "tsc --noEmit",
+    "test": "bun test && uv run python -m unittest discover -s tests"
+  },
+  "dependencies": {
+    "@oh-my-pi/pi-tui": "18.4.9"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.9.0"
+  }
+}
