@@ -11,12 +11,15 @@ For app policies use [ui.md](ui.md); for the separate Python JSONL/TDLib transpo
 | Change | Repository integration |
 | --- | --- |
 | Launch/hello and surface title/role | [main.ts](../terngram/ui/main.ts) |
+| Plugin tab launch and shell quoting | [window.luau](../packaging/tern/window.luau), [runtime bootstrap](../scripts/launch_release.sh) |
 | Frame provider, focus, native actions and overlay orchestration | [app.ts](../terngram/ui/app.ts) |
 | Message identity, Markdown, portraits and preview nodes | [message-view.ts](../terngram/ui/message-view.ts) |
 | Dock roles and composer order | [chat-dock.ts](../terngram/ui/chat-dock.ts) |
 | Native picker query/caret/filter/selection | [command-palette.ts](../terngram/ui/command-palette.ts), [forward-picker.ts](../terngram/ui/forward-picker.ts) |
 | Full-photo overlay and stable selection | [photo-viewer.ts](../terngram/ui/photo-viewer.ts) |
 | Shared action controls and background images | [nodes.ts](../terngram/ui/nodes.ts), [image-loader.ts](../terngram/ui/image-loader.ts) |
+
+Plugin tab commands are interpreted by the user's login shell. The launcher invokes `/bin/sh -c` explicitly for its POSIX conditional and quotes the outer argument for both fish and POSIX shells, including paths containing spaces or apostrophes. Do not pass `if … then … fi` directly to the login shell.
 
 After dependency installation, inspect these **local package source paths** when changing or upgrading the integration (not generated-declaration links that assume `node_modules` exists in a repository browser):
 

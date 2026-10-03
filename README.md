@@ -4,7 +4,7 @@
 
 A keyboard-first Telegram client drawn natively by [Tern](https://stencil.so/tern). Your conversations take the space; commands stay one shortcut away. No embedded Telegram Web, no ANSI fallback.
 
-Built with the [oh-my-pi](https://github.com/can1357/oh-my-pi) native UI toolkit and the official [TDLib](https://core.telegram.org/tdlib). Terngram is an **unofficial client** using the Telegram API with your personal account—not a bot or an official Telegram app.
+Built with the [oh-my-pi](https://github.com/can1357/oh-my-pi) native UI toolkit and the official [TDLib](https://core.telegram.org/tdlib). An unofficial Telegram client built for Tern.
 
 [Quick start](#quick-start) · [Sign in](#sign-in) · [Keyboard](#keyboard) · [Current limits](#current-limits) · [Developing](#developing)
 
