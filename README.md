@@ -12,8 +12,6 @@ Built with the [oh-my-pi](https://github.com/can1357/oh-my-pi) native UI toolkit
 
 - **One palette, not a permanent sidebar.** `Ctrl+K` finds chats and commands. Chat-name search is local; missing catalog pages load in the background without hiding ready results. `Ctrl+F` narrows the palette to chats.
 - **Pick up where you left off.** Draft text survives restarts. Recent chats, back/forward navigation, replies and editing keep everyday conversation close at hand.
-- **Delivery without the ceremony.** A compact sending indicator replaces routine delivery banners. Delivery state updates automatically; failed messages remain in the conversation and offer an explicit retry. A queued request is never presented as a successful send.
-- **Photos belong in the conversation.** Inline previews, grouped albums and a keyboard-operated gallery. Original images load on demand; image documents without thumbnails are not silently downloaded as previews.
 - **Useful context, not control clutter.** Chat type, participant counts, typing, privacy-filtered presence and read receipts. Contextual hints can be hidden without hiding errors or meaningful state.
 
 ## Quick start
@@ -67,9 +65,11 @@ See [development setup](docs/development.md) for dependency checks, troubleshoot
 2. In an already signed-in Telegram app, open **Settings → Devices → Link Desktop Device** and scan the QR code.
 3. Enter your **two-step verification password** if requested.
 
-TDLib rotates the QR code automatically. Subsequent launches use the saved session. **QR and optional 2FA are the only login path:** there is no phone-number/code form, email login or signup flow.
+TDLib rotates the QR code automatically. Subsequent launches use the saved session. 
+**QR and optional 2FA are the only login path:** there is no phone-number/code form, email login or signup flow.
 
-Closing Terngram keeps the session. **Sign out…** revokes this client's session after confirmation.
+Closing Terngram keeps the session. 
+**Sign out…** revokes this client's session after confirmation.
 
 ## Keyboard
 
