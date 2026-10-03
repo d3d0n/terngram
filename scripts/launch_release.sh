@@ -3,7 +3,7 @@
 set -eu
 umask 077
 VERSION=0.1.0
-SHA256=9cd88639aa9740fe279bb0997894efe475e6c3bfc21f647362be3a4863b4afbf
+SHA256=fa0ea28ddb890340e5bb1beab2f8b78ca39bb8aebcf37709dd573b57e83e8924
 
 fail() {
     printf 'Terngram: %s\n' "$*" >&2
