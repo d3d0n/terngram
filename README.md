@@ -8,12 +8,6 @@ Built with the [oh-my-pi](https://github.com/can1357/oh-my-pi) native UI toolkit
 
 [Quick start](#quick-start) · [Sign in](#sign-in) · [Keyboard](#keyboard) · [Current limits](#current-limits) · [Developing](#developing)
 
-## A conversation-first workspace
-
-- **One palette, not a permanent sidebar.** `Ctrl+K` finds chats and commands. Chat-name search is local; missing catalog pages load in the background without hiding ready results. `Ctrl+F` narrows the palette to chats.
-- **Pick up where you left off.** Draft text survives restarts. Recent chats, back/forward navigation, replies and editing keep everyday conversation close at hand.
-- **Useful context, not control clutter.** Chat type, participant counts, typing, privacy-filtered presence and read receipts. Contextual hints can be hidden without hiding errors or meaningful state.
-
 ## Quick start
 
 ### macOS release
