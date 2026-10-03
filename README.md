@@ -2,9 +2,9 @@
 
 **Telegram, at home in Tern.**
 
-A keyboard-first Telegram client drawn natively by [Tern](https://stencil.so/tern). Your conversations take the space; commands stay one shortcut away. No embedded Telegram Web, no ANSI fallback.
+A keyboard-first unofficial Telegram client drawn natively by [Tern](https://stencil.so/tern).
 
-Built with the [oh-my-pi](https://github.com/can1357/oh-my-pi) native UI toolkit and the official [TDLib](https://core.telegram.org/tdlib). An unofficial Telegram client built for Tern.
+Built with the [oh-my-pi](https://github.com/can1357/oh-my-pi) native UI toolkit and the official [TDLib](https://core.telegram.org/tdlib). 
 
 [Quick start](#quick-start) · [Sign in](#sign-in) · [Keyboard](#keyboard) · [Current limits](#current-limits) · [Developing](#developing)
 
