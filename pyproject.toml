@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "terngram"
-version = "0.1.0"
+version = "0.1.1"
 description = "A native Telegram client for Tern"
 requires-python = ">=3.12"
 dependencies = ["qrcode[pil]>=8.2,<9"]
@@ -17,3 +17,10 @@ include = ["terngram*"]
 
 [tool.setuptools.package-data]
 terngram = ["ui/*.ts"]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+# Adopt runtime-error checks without a checkout-wide style migration.
+select = ["E9", "F63", "F7", "F82"]

@@ -153,6 +153,7 @@ const failedMessageId = queuedMessageId + 1;
 let participantCount = 42;
 const rpcCalls: { method: string; args: unknown[] }[] = [];
 const delayedPhotos = new Map<number, ReturnType<typeof Promise.withResolvers<Photo>>>();
+const delayedPreviewPhotos = new Map<number, { promise: Promise<Photo> }>();
 let authorization: Authorization = { state: "credentials" };
 app.telegram.call = <T>(method: string, args: unknown[] = []): Promise<T> => {
   rpcCalls.push({ method, args });
@@ -242,8 +243,8 @@ app.telegram.call = <T>(method: string, args: unknown[] = []): Promise<T> => {
   else if (method === "dialogs") result = dialogPageGate ?? Promise.resolve({ dialogs: args.length ? [dialog(1, "Alice"), dialog(3, "Carol")] : app.dialogs.slice(0, 60), cursor: null });
   else if (method === "photo") {
     photoRequests.push(args);
-    result = args[2] !== true && delayedPhotos.has(Number(args[1]))
-      ? delayedPhotos.get(Number(args[1]))!.promise : Promise.resolve({ data: png, mime: "image/png", width: 1, height: 1 });
+    const delayed = (args[2] === true ? delayedPreviewPhotos : delayedPhotos).get(Number(args[1]));
+    result = delayed?.promise ?? Promise.resolve({ data: png, mime: "image/png", width: 1, height: 1 });
   }
   else if (method === "chat_info") result = Promise.resolve({ participants_count: args[0] === 1 ? participantCount : null });
   else if (method === "message_readers") result = Promise.resolve(3);
@@ -284,7 +285,7 @@ const host: NativeHost = {
   focused: () => focus, focusFromPointer: owners => { if (owners[0]) ui.setFocus(owners[0]); }, requestRender() {},
   appearanceChanged() {}, motionChanged() {}, invalidate: () => app.invalidate(),
 };
-const backend = new NativeBackend(host, { r: "hello", v: 1, term: "smoke", kinds: TSP_KINDS, features: ["scroll"], credits: 1000, cols: 110 }, { mirror: true, recordPath: "" });
+const backend = new NativeBackend(host, { r: "hello", v: 1, term: "smoke", kinds: TSP_KINDS, features: ["scroll"], credits: 1000, cols: 110 }, { mirror: true, recordPath: "", surfaceMode: "screen" });
 function draw() {
   backend.render();
   for (const frame of frames) backend.handleInput(encodeTspJson("e", { ev: "ack", sf: frame.sf, s: frame.s }));
@@ -677,8 +678,22 @@ try {
   action("chat:2"); draw();
   assert.equal(app.composer.getText(), "Bob draft");
   assert(snapshot().some(node => node.k === "text" && node.p?.spans?.map(span => span.t).join("") === "Bob history"));
-  action("chat:1"); app.intercept("\x0c"); draw();
+  action("bottom"); draw();
+  action("chat:1"); draw();
+  action(`message:${alice.messages[0]!.id}`); draw();
+  assert(snapshot().some(node => node.p?.selected === true), "history selection is visible before jumping to latest");
+  app.intercept("\x0c"); draw();
+  assert(!snapshot().some(node => node.p?.selected === true), "Ctrl+L releases the old message selection instead of keeping its history anchor");
   assert(frames.at(-1)!.ops.some(op => op[0] === "scroll" && op[2] === "end"));
+  const beforeRebuild = frames.length;
+  backend.handleInput(encodeTspJson("e", { ev: "gone", ids: [frames.at(-1)!.sf] })); draw();
+  const hiddenIds = new Set(snapshot().filter(node => node.p?.hidden === true).flatMap(node => nodes(node).map(child => child.id)));
+  assert(frames.slice(beforeRebuild).every(frame => frame.ops.every(op => op[0] !== "reveal" || !hiddenIds.has(op[1]))), "rebuilding the surface must not reveal anchors inside inactive chats");
+  const beforeDecoration = frames.length;
+  const decorated = alice.messages[0]!;
+  app.telegram.onUpdate!({ kind: "message", chat_id: 1, message: { ...decorated, time: `${decorated.time} · background update` } }); draw();
+  assert(!snapshot().some(node => node.p?.selected === true), "a late message update must not restore the historical selection");
+  assert(frames.slice(beforeDecoration).every(frame => frame.ops.every(op => op[0] !== "reveal" && op[0] !== "scroll")), "late decorations repaint without moving the viewport after Ctrl+L");
   action("bottom"); draw();
   assert(frames.at(-1)!.ops.some(op => op[0] === "scroll" && op[2] === "end"), "repeated bottom action scrolls again");
   app.scroll("page-up"); draw();
@@ -709,10 +724,47 @@ try {
   assert(snapshot().some(node => node.p?.role === "terngram.gallery"), "replacing an album photo preserves the open gallery while refreshed media loads");
   await waitForView(() => {
     const updatedGallery = snapshot().find(node => node.p?.role === "terngram.gallery");
-    return updatedGallery !== undefined && nodes(updatedGallery).some(node => node.p?.text === "Replaced image");
+    return updatedGallery !== undefined && nodes(updatedGallery).some(node => node.k === "image")
+      && nodes(updatedGallery).some(node => node.p?.text === "Replaced image");
   });
   assert.equal(photoRequests.filter(args => args[1] === 14).length, oldPhotoCalls + 2, "replaced media fetches both a new preview and new full image");
   app.closePhoto();
+  action("dismiss-status");
+  const racedPreview = { ...message(17, 1, "[Photo]"), photo: true, media_id: "17-current" };
+  const previewChanged = Promise.withResolvers<Photo>();
+  delayedPreviewPhotos.set(17, previewChanged);
+  app.telegram.onUpdate!({ kind: "message", chat_id: 1, message: racedPreview }); draw();
+  delayedPreviewPhotos.delete(17);
+  app.telegram.onUpdate!({ kind: "message", chat_id: 1, message: { ...racedPreview, edited: true } });
+  previewChanged.reject(new TelegramRequestError("photo", "Expected media invalidation", 0, "MEDIA_CHANGED"));
+  await waitForView(() => snapshot().some(node => node.k === "image" && node.p?.actions?.click === "photo:17"));
+  assert.equal(photoRequests.filter(args => args[1] === 17 && args[2] === true).length, 2, "same-key expected cancellation loads current preview exactly once");
+  assert.equal(app.error, false, "normal preview invalidation has no global error banner");
+  const racedFull = { ...message(18, 1, "[Photo]"), photo: true, media_id: "18-old" };
+  const fullChanged = Promise.withResolvers<Photo>();
+  delayedPhotos.set(18, fullChanged);
+  app.telegram.onUpdate!({ kind: "message", chat_id: 1, message: racedFull }); draw();
+  action("photo:18");
+  delayedPhotos.delete(18);
+  app.telegram.onUpdate!({ kind: "message", chat_id: 1, message: { ...racedFull, media_id: "18-new", text: "Replacement caption", markdown: "Replacement caption" } });
+  fullChanged.reject(new TelegramRequestError("photo", "Expected media invalidation", 0, "MEDIA_CHANGED"));
+  await waitForView(() => snapshot().some(node => node.p?.role === "terngram.gallery"));
+  assert.equal(photoRequests.filter(args => args[1] === 18 && args[2] !== true).length, 2, "gallery retries only the current replacement resource");
+  assert(snapshot().some(node => node.p?.text === "Replacement caption"), "gallery uses the authoritative replacement's caption");
+  assert.equal(app.error, false, "normal full-photo replacement has no global error banner");
+  app.telegram.onUpdate!({ kind: "message", chat_id: 1, message: { ...racedFull, photo: false, media_id: null, text: "Photo removed", markdown: "Photo removed" } }); draw();
+  assert(!snapshot().some(node => node.p?.role === "terngram.gallery"), "removing the only photo closes the viewer instead of showing stale bytes");
+  assert(!snapshot().some(node => node.p?.actions?.click === "photo:18"), "removed media has no preview/open action left in its message");
+  assert.equal(app.error, false);
+  const removedPreview = Promise.withResolvers<Photo>();
+  delayedPreviewPhotos.set(19, removedPreview);
+  app.telegram.onUpdate!({ kind: "message", chat_id: 1, message: { ...message(19, 1, "[Photo]"), photo: true, media_id: "19-old" } }); draw();
+  delayedPreviewPhotos.delete(19);
+  app.telegram.onUpdate!({ kind: "delete", chat_id: 1, ids: [19] });
+  removedPreview.reject(new TelegramRequestError("photo", "Expected media invalidation", 0, "MEDIA_CHANGED"));
+  await Bun.sleep(0); draw();
+  assert(!snapshot().some(node => node.p?.actions?.click === "photo:19" || node.p?.actions?.click === "message:19"), "deleted message and in-flight preview stay removed");
+  assert.equal(app.error, false, "deletion during a preview load is not an error");
   const formatted = { ...message(16, 1, "Bold and code"), markdown: "**Bold** and `code`", entities: [
     { offset: 0, length: 4, type: { "@type": "textEntityTypeBold" } },
     { offset: 9, length: 4, type: { "@type": "textEntityTypeCode" } },

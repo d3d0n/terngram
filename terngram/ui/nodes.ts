@@ -16,6 +16,11 @@ export function line(key: string, text: string): NativeNode {
 }
 
 /** Message previews used inside compact single-line contexts. */
-export function preview(text: string): string {
-  return text.replace(/\s+/g, " ").slice(0, 120);
+export function preview(text: string, limit = 120): string {
+  const compact = text.replace(/\s+/g, " ");
+  let end = Math.min(limit, compact.length);
+  if (end > 0 && end < compact.length
+    && compact.charCodeAt(end - 1) >= 0xd800 && compact.charCodeAt(end - 1) <= 0xdbff
+    && compact.charCodeAt(end) >= 0xdc00 && compact.charCodeAt(end) <= 0xdfff) end--;
+  return compact.slice(0, end);
 }

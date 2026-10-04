@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Package existing macOS arm64 runtimes using stdlib Python; do not build/sign them.
 
-Example (from the checkout; Python >=3.11 runs this packaging script):
-  .venv/bin/python -B scripts/build_release.py --python .venv/bin/python \
-      --bun /path/to/bun --tdlib /path/to/libtdjson.dylib
+Example (from the checkout):
+  mise run build --tdlib /path/to/libtdjson.dylib
+Additional builder flags are forwarded unchanged by mise.
 
 Mach-O artifacts are copied byte-for-byte, including existing signatures and
 load commands. The launcher scopes dyld library/framework lookup to the package.
@@ -42,7 +42,7 @@ PROJECT_FILES = (
     'terngram/tdlib.py', 'terngram/telegram.py', 'terngram/worker.py',
     'terngram/ui/app.ts', 'terngram/ui/chat-dock.ts', 'terngram/ui/chat-navigation.ts',
     'terngram/ui/chat-state.ts', 'terngram/ui/command-palette.ts',
-    'terngram/ui/forward-picker.ts', 'terngram/ui/image-loader.ts',
+    'terngram/ui/debug-log.ts', 'terngram/ui/forward-picker.ts', 'terngram/ui/image-loader.ts',
     'terngram/ui/main.ts', 'terngram/ui/message-view.ts', 'terngram/ui/nodes.ts',
     'terngram/ui/photo-viewer.ts', 'terngram/ui/read-receipts.ts',
     'terngram/ui/reader-counts.ts', 'terngram/ui/request-cooldowns.ts',
@@ -627,7 +627,7 @@ def main() -> None:
     parser.add_argument('--license-file', type=Path, action='append', default=[], help='Optional additional existing notice/license text to copy; no completeness claim')
     parser.add_argument('--output-dir', type=Path, default=REPO / 'dist', help='Output directory; never overwrite existing release files')
     parser.add_argument('--staging-dir', type=Path, default=REPO / 'build/macos-release', help='Builder-owned staging parent; each build gets a new subdirectory')
-    parser.add_argument('--expect-version', default='0.1.0', help='Required project/plugin version')
+    parser.add_argument('--expect-version', default='0.1.1', help='Required project/plugin version')
     parser.add_argument('--expect-python-version', help='Optional exact interpreter version requirement')
     parser.add_argument('--expect-bun-version', help='Optional exact Bun binary version requirement')
     parser.add_argument('--expect-tdlib-version', help='Optional exact TDLib version requirement')

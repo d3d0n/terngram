@@ -19,6 +19,7 @@ import { ChatNavigation } from "./chat-navigation";
 import { ReadReceipts } from "./read-receipts";
 import { RequestCooldowns } from "./request-cooldowns";
 import { ReaderCounts } from "./reader-counts";
+import type { DebugLog, DebugState } from "./debug-log";
 
 const PAGE_SIZE = 50;
 const SINGLE_PRESS_KEYS = ["enter", "ctrl+enter", "escape", "ctrl+r", "ctrl+g", "ctrl+k", "ctrl+f", "ctrl+q", "ctrl+c"] as const;
@@ -164,7 +165,7 @@ export class TerngramApp implements Component {
   private password: Field;
   private composer: Editor;
 
-  constructor(private tui: TUI, private python: string, private dataDir: string, private root: string, private exit: () => Promise<void>) {
+  constructor(private tui: TUI, private python: string, private dataDir: string, private root: string, private exit: () => Promise<void>, private readonly debugLog?: DebugLog) {
     const changed = () => this.redraw();
     const disabled = () => this.busy;
     this.apiId = new Field("API ID", false, changed, disabled);
@@ -181,6 +182,7 @@ export class TerngramApp implements Component {
       if (thread) { thread.draft = text; this.schedulePersist(); }
       this.userActivity();
       this.composerActivity(text);
+      if (this.stage === "chats") this.debugLog?.record("model_edit", this.debugState());
       this.redraw(false);
     };
     this.composer.onSubmit = text => {
@@ -190,7 +192,54 @@ export class TerngramApp implements Component {
       void this.send(text);
     };
     this.telegram = this.newConnection();
-    this.tui.addInputListener(data => this.intercept(data));
+    this.tui.addInputListener(data => {
+      if (!this.debugLog) return this.intercept(data);
+      const before = this.debugState();
+      const result = this.intercept(data);
+      this.debugLog.record("input_route", { consumed: !!result?.consume, before, after: this.debugState() });
+      return result;
+    });
+  }
+
+  /** Local routing state only: not proof of host focus, visibility, or mounted geometry. */
+  debugState(): DebugState {
+    const focused = this.tui.getFocused();
+    const thread = this.currentThread();
+    const writable = this.selectedDialog()?.writable;
+    const chats = this.stage === "chats";
+    const role = focused === null ? "none"
+      : focused === this.composer ? "composer"
+      : focused === this.palette ? "palette"
+      : focused === this.help ? "help"
+      : focused === this.photoViewer ? "gallery"
+      : focused === this.forwardPicker ? "forward"
+      : focused === this.apiId ? "auth-api-id"
+      : focused === this.apiHash ? "auth-api-hash"
+      : focused === this.password ? "auth-password"
+      : focused === this ? chats ? "messages" : "auth"
+      : "unknown";
+    return {
+      stage: this.stage, busy: this.busy, quitting: this.quitting, online: this.online,
+      focusRole: role, hasFocus: focused !== null, canHandleInput: typeof focused?.handleInput === "function",
+      messagesFocused: this.focused, composerFocused: this.composer.focused,
+      messagesAvailable: chats && this.selectedId !== null,
+      composerAvailable: chats && this.selectedId !== null && writable !== false,
+      composerSubmitDisabled: this.composer.disableSubmit,
+      ...(chats ? { composerLength: this.composer.getText().length } : {}),
+      selectedChat: this.selectedId !== null, writable: writable === true,
+      palette: !!this.palette, paletteHidden: this.paletteOverlay?.isHidden() ?? false,
+      help: !!this.help, helpHidden: this.helpOverlay?.isHidden() ?? false,
+      gallery: !!this.photoViewer, galleryHidden: this.photoOverlay?.isHidden() ?? false,
+      forward: !!this.forwardPicker, forwardHidden: this.forwardOverlay?.isHidden() ?? false,
+      deleteConfirm: this.deleteConfirm !== null, logoutConfirm: this.stage === "logout",
+      abandonConfirm: this.abandonConfirm !== null, messageSelected: this.actionMessage !== null,
+      threadAvailable: !!thread, threadLoaded: !!thread?.loaded, threadLoading: !!thread?.loading,
+      replying: thread?.replyTo != null, editing: !!thread?.editing, sending: !!thread?.sending,
+      savingEdit: !!thread && this.savingEdits.has(thread), pendingSend: !!thread?.pendingSend,
+      detached: this.selectedId !== null && this.detached.has(this.selectedId),
+      refreshing: this.refreshing, loadingMoreChats: this.loadingMoreChats,
+      idleMs: this.lastInput ? Math.max(0, Date.now() - this.lastInput) : null,
+    };
   }
 
   private newConnection(): Telegram {
@@ -298,6 +347,7 @@ export class TerngramApp implements Component {
     this.palette?.setLoading(this.loadingMoreChats);
     this.forwardPicker?.setLoading(this.loadingMoreChats);
     if (body) this.body.invalidate();
+    this.debugLog?.record("app_state", this.debugState());
     this.tui.requestRender();
   }
   private focusDefault(): void {
@@ -732,7 +782,10 @@ export class TerngramApp implements Component {
         }
       }
       if (this.currentThread()) this.setComposer(this.currentThread()!.draft);
-      if (affectsGallery) this.closePhoto();
+      if (affectsGallery) {
+        this.refreshPhotoViewer();
+        if (this.photoGroup) void this.viewPhoto(this.photoGroup, true);
+      }
       this.redraw(); return;
     }
     if (update.kind === "read" && update.max_id !== undefined) {
@@ -750,10 +803,9 @@ export class TerngramApp implements Component {
     const previous = thread.getMessage(message.id);
     if (previous && (previous.media_id !== message.media_id || previous.photo && !message.photo)) {
       this.invalidatePhoto(previous);
-      if (!message.photo && this.photoGroup?.chat_id === message.chat_id && this.albumMembers(this.photoGroup).some(item => item.id === message.id))
-        this.closePhoto();
     }
     const isNew = thread.receive(message);
+    this.refreshPhotoViewer();
     if (this.selectedId === message.chat_id) this.queueAvatar(message.sender_id);
     const dialog = this.dialogs.find(item => item.id === update.chat_id);
     if (dialog) {
@@ -776,6 +828,16 @@ export class TerngramApp implements Component {
     const key = photoKey(message);
     this.previews.invalidate(key);
     this.photoNodes.delete(key);
+    this.refreshPhotoViewer();
+  }
+  private refreshPhotoViewer(): void {
+    if (!this.photoViewer || !this.photoGroup) return;
+    const members = this.albumMembers(this.photoGroup).filter(message => message.photo);
+    if (!members.length) { this.closePhoto(); return; }
+    const images = members.map(message => this.photoNodes.get(photoKey(message)) ?? {
+      k: "spinner", key: `full-photo-${message.chat_id}:${message.id}`, p: { label: "Loading photo…" },
+    } satisfies NativeNode);
+    this.photoViewer.setContent(images, members.map(message => message.text === "[Photo]" ? "" : message.text));
   }
   private queueAvatar(senderId: number | null): void {
     if (senderId === null || this.quitting || this.cooldowns.remaining("avatar", senderId)) return;
@@ -788,17 +850,34 @@ export class TerngramApp implements Component {
   }
   private queuePreviews(id: number): void {
     if (this.selectedId !== id || this.quitting || this.cooldowns.remaining("photo", id)) return;
+    const generation = this.generation;
+    const connection = this.telegram;
     for (const group of this.thread(id).groups) {
       const photos = group.filter(message => message.photo);
       for (const message of photos.slice(0, 4)) {
         const key = photoKey(message);
-        this.previews.request(key, async () => {
-          const photo = await this.telegram.call<Photo | null>("photo", [id, message.id, true]);
-          return photo ? base64ImageNode(photo.data, photo.mime, {
-            alt: "Photo preview", title: "Open full photo",
-            max: { w: "32ch", h: "10lines" },
-            actions: { click: `photo:${message.id}` },
-          }, `preview-${key}`) : null;
+        this.previews.request(key, async currentEntry => {
+          try {
+            const photo = await connection.call<Photo | null>("photo", [id, message.id, true]);
+            const current = this.threads.get(id)?.getMessage(message.id);
+            if (generation !== this.generation || connection !== this.telegram || !current?.photo || photoKey(current) !== key) return null;
+            return photo ? base64ImageNode(photo.data, photo.mime, {
+              alt: "Photo preview", title: "Open full photo",
+              max: { w: "32ch", h: "10lines" },
+              actions: { click: `photo:${message.id}` },
+            }, `preview-${key}`) : null;
+          } catch (error) {
+            if (!(error instanceof TelegramRequestError) || error.code !== "MEDIA_CHANGED") throw error;
+            if (generation === this.generation && connection === this.telegram && currentEntry() && !this.quitting) {
+              this.invalidatePhoto(message);
+              this.queuePreviews(id);
+              const current = this.threads.get(id)?.getMessage(message.id);
+              if (current?.photo && this.photoViewer && this.photoGroup?.chat_id === id
+                && (this.photoGroup.id === current.id || current.grouped_id !== null && this.photoGroup.grouped_id === current.grouped_id))
+                void this.viewPhoto(current, true);
+            }
+            return null;
+          }
         });
       }
     }
@@ -1122,6 +1201,7 @@ export class TerngramApp implements Component {
     if (this.selectedId === null) return;
     const id = this.selectedId;
     const thread = this.thread(id);
+    this.actionMessage = this.deleteConfirm = null;
     this.scrolls.set(id, { by: "end", n: (this.scrolls.get(id)?.n ?? 0) + 1 }); this.detached.delete(id);
     thread.acknowledgeNewMessages(); this.redraw(); void this.markRead(id);
   }
@@ -1315,34 +1395,43 @@ export class TerngramApp implements Component {
       return;
     }
     const generation = this.generation;
+    const connection = this.telegram;
     const request = { intent: background ? this.photoIntent : ++this.photoIntent };
     this.photoLoading.set(key, request); this.redraw();
     try {
       if (message.grouped_id !== null && !this.resolvedAlbums.has(key)) {
         const thread = this.thread(message.chat_id);
         const started = thread.revision;
-        const album = await this.telegram.call<ChatMessage[]>("album", [message.chat_id, message.id]);
-        if (generation !== this.generation) return;
+        const album = await connection.call<ChatMessage[]>("album", [message.chat_id, message.id]);
+        if (generation !== this.generation || connection !== this.telegram) return;
         thread.applyPage(album, started);
         this.resolvedAlbums.add(key);
         this.queuePreviews(message.chat_id);
       }
       let members: ChatMessage[];
       for (;;) {
-        if (request.intent !== this.photoIntent || this.selectedId !== message.chat_id || this.quitting) return;
+        if (generation !== this.generation || connection !== this.telegram || request.intent !== this.photoIntent || this.selectedId !== message.chat_id || this.quitting) return;
         members = this.albumMembers(message).filter(item => item.photo);
         const missing = members.filter(item => !this.photoNodes.has(photoKey(item)));
         if (!missing.length) break;
         await Promise.all(missing.map(async item => {
           const imageKey = photoKey(item);
-          const photo = await this.telegram.call<Photo>("photo", [item.chat_id, item.id]);
-          const current = this.thread(item.chat_id).getMessage(item.id);
-          if (generation !== this.generation || !current?.photo || current.media_id !== item.media_id) return;
-          this.photoNodes.set(imageKey, base64ImageNode(photo.data, photo.mime, { alt: "Telegram photo", max: { w: "80ch", h: "28lines" } }, `full-photo-${item.chat_id}:${item.id}`));
+          try {
+            const photo = await connection.call<Photo>("photo", [item.chat_id, item.id]);
+            const current = this.threads.get(item.chat_id)?.getMessage(item.id);
+            if (generation !== this.generation || connection !== this.telegram || request.intent !== this.photoIntent || this.selectedId !== item.chat_id || this.quitting || !current?.photo || photoKey(current) !== imageKey) return;
+            this.photoNodes.set(imageKey, base64ImageNode(photo.data, photo.mime, { alt: "Telegram photo", max: { w: "80ch", h: "28lines" } }, `full-photo-${item.chat_id}:${item.id}`));
+          } catch (error) {
+            if (!(error instanceof TelegramRequestError) || error.code !== "MEDIA_CHANGED") throw error;
+            if (generation === this.generation && connection === this.telegram && request.intent === this.photoIntent && this.selectedId === item.chat_id && !this.quitting) {
+              this.invalidatePhoto(item);
+              this.queuePreviews(item.chat_id);
+            }
+          }
         }));
-        if (generation !== this.generation) return;
+        if (generation !== this.generation || connection !== this.telegram) return;
       }
-      if (request.intent !== this.photoIntent || this.selectedId !== message.chat_id || this.quitting) return;
+      if (generation !== this.generation || connection !== this.telegram || request.intent !== this.photoIntent || this.selectedId !== message.chat_id || this.quitting) return;
       const sameGroup = this.photoGroup?.chat_id === message.chat_id && (message.grouped_id !== null ? this.photoGroup.grouped_id === message.grouped_id : this.photoGroup.id === message.id);
       if (!members.length) { if (sameGroup) this.closePhoto(); return; }
       const images = members.map(item => this.photoNodes.get(photoKey(item))!);
@@ -1356,7 +1445,7 @@ export class TerngramApp implements Component {
         this.photoDisplayedIntent = request.intent;
         this.photoOverlay = this.tui.showOverlay(this.photoViewer);
       }
-    } catch (error) { if (generation === this.generation && request.intent === this.photoIntent) this.fail(error); }
+    } catch (error) { if (generation === this.generation && connection === this.telegram && request.intent === this.photoIntent) this.fail(error); }
     finally {
       if (this.photoLoading.get(key) === request) this.photoLoading.delete(key);
       this.redraw();
@@ -1584,7 +1673,7 @@ export class TerngramApp implements Component {
       ...[...this.threads].filter(([id, state]) => id === this.selectedId || state.loaded || state.loading || state.messages.length > 0).map(([id, state]): NativeNode => ({ k: "col", key: `thread-${id}`, scroll: this.scrolls.get(id), p: { hidden: id !== this.selectedId, gap: "sm" }, c: [
         ...(state.more && state.messages.length ? [button("older", state.loading ? "Loading earlier messages…" : "Load earlier messages", state.loading)] : []),
         ...(!state.messages.length ? [label(state.loading ? "Loading messages…" : state.loaded ? "No messages in this chat." : "Messages are not loaded. Refresh to try again.", "empty")] : state.groups.map(group => this.messageNode(group, state))),
-        { k: "text", key: `tail-${this.scrolls.get(id)?.by === "end" ? this.scrolls.get(id)!.n : 0}`, reveal: this.scrolls.get(id)?.by === "end" ? "end" : undefined, p: { text: "" } },
+        { k: "text", key: `tail-${this.scrolls.get(id)?.by === "end" ? this.scrolls.get(id)!.n : 0}`, reveal: id === this.selectedId && this.scrolls.get(id)?.by === "end" ? "end" : undefined, p: { text: "" } },
       ] })),
     ] };
   }

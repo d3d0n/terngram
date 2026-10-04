@@ -56,6 +56,8 @@ The frontend starts `python -m terngram.worker --data-dir PATH` with pipe stdin/
 
 These are shape examples, not account/session data. Request `id` must be a Python integer (not bool); the frontend allocates sequential integers. `method` must be in `METHODS`, and `args` must be a positional array (default `[]`). The worker validates the envelope; service methods validate values. Dataclass results serialize to objects, Python `None` to JSON `null`. Responses match frontend pending promises by ID and are not ordered by request arrival.
 
+`TelegramRequestError.code` retains the structured worker `error_code` separately from its display message and retry-after metadata. `MEDIA_CHANGED` is an expected photo-request cancellation: the service emits an authoritative `message` or genuine `delete` update before the failure response. The worker forwards that code without overwriting `tdlib/last-error.json`; it is not a global error banner or an instruction to reuse old bytes.
+
 Ordinary methods execute concurrently. `connect`, `request_qr`, `sign_in_password`, `logout` and `close` are exclusive transitions:
 
 1. A transition waits until no transition or ordinary request is active.
@@ -259,6 +261,8 @@ Successful `logout` calls native `logOut`, closes and deletes **`tdlib/state.jso
 `photo` supports native photos and image documents with MIME JPEG, PNG, GIF, WebP or BMP. Photo preview picks the smallest valid size with long side at least 320 pixels, otherwise the largest; full opens select the largest. Document preview uses only JPEG/PNG/WebP thumbnails and returns null if absent/unsupported, regardless of original file size. Full document reads original bytes and derives dimensions with Pillow; Python does not resize originals. Avatars use cached user/chat metadata and the small photo, not legacy access-hash resolution.
 
 The service checks current restriction/ephemeral state, `can_be_saved`, both user protection flags and chat protection before download. Self-destruct/view-once previews return null without consuming content. Non-saveable temporary content is refused; self-destruct content requiring protected viewing gives `MEDIA_PROTECTED_VIEWER_REQUIRED`, a limitation of this host/viewer, not a claim that Telegram cannot display it. Allowed explicit full opens call native `openMessageContent`. Message version fences after access checks, download and open reject media that changed or expired in flight. Content replacement and permanent deletion must invalidate paired frontend image caches; see [ui.md](ui.md).
+
+Replacement/removal during photo lookup, access checking, download or open publishes the current model and returns `MEDIA_CHANGED`, never the old download. Missing/removed photo snapshots no longer leave a stale photo action in the frontend. Permanent deletion markers prevent late native snapshots from resurrecting deleted media; uncached changed messages are refetched with the existing `getMessages` transport and version-fenced. The frontend then evicts obsolete preview/full-image entries, loads the authoritative replacement if it remains a photo, or removes the photo/member/message. No new RPC, generic network retry, protected-content bypass or “photo unavailable” placeholder is added. Other access, protection, identity, network and filesystem failures remain errors.
 
 A returned native path is readable only beneath:
 

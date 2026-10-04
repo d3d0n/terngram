@@ -4,6 +4,7 @@ import { SelectListSheet } from "@oh-my-pi/pi-tui/native/picker";
 import { getSelectListTheme } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 import type { Component } from "@oh-my-pi/pi-tui/tui";
 import type { Dialog } from "./telegram";
+import { preview } from "./nodes";
 
 /** Chooses a writable destination for forwarding a message or album. */
 export class ForwardPicker implements Component {
@@ -29,7 +30,7 @@ export class ForwardPicker implements Component {
     this.list.setItems(dialogs.filter(dialog => dialog.writable).map(dialog => ({
       value: String(dialog.id),
       label: dialog.title,
-      description: [dialog.unread_count ? `${dialog.unread_count} unread` : "", dialog.preview.slice(0, 160)].filter(Boolean).join(" · "),
+      description: [dialog.unread_count ? `${dialog.unread_count} unread` : "", preview(dialog.preview, 160)].filter(Boolean).join(" · "),
     })));
   }
 

@@ -105,7 +105,7 @@ function validateIds(value: unknown): void {
 }
 
 export class TelegramRequestError extends Error {
-  constructor(readonly method: string, message: string, readonly retryAfterSeconds = 0) {
+  constructor(readonly method: string, message: string, readonly retryAfterSeconds = 0, readonly code?: string) {
     super(`${method}: ${message}`);
     this.name = "TelegramRequestError";
   }
@@ -172,7 +172,7 @@ export class Telegram {
           if (typeof message.error === "string") {
             const retryAfter = typeof message.retry_after === "number" && Number.isFinite(message.retry_after) ? Math.max(0, message.retry_after) : 0;
             this.cooldowns.block(request.method, request.peer, retryAfter, message.retry_scope === "peer" ? "peer" : "method");
-            request.reject(new TelegramRequestError(request.method, `${typeof message.error_code === "string" ? `[${message.error_code}] ` : ""}${message.error}`, retryAfter));
+            request.reject(new TelegramRequestError(request.method, `${typeof message.error_code === "string" ? `[${message.error_code}] ` : ""}${message.error}`, retryAfter, typeof message.error_code === "string" ? message.error_code : undefined));
           }
           else {
             try { validateIds(message.result); request.resolve(message.result); }

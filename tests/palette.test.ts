@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
 import type { NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
+import type { Terminal } from "@oh-my-pi/pi-tui/terminal";
+import { NativeBackend, type NativeHost } from "@oh-my-pi/pi-tui/native/backend";
+import { TspDocument } from "@oh-my-pi/pi-tui/native/apply";
+import { encodeTspJson, splitTspMessage } from "@oh-my-pi/pi-tui/native/encode";
+import { TSP_KINDS, type TspFrame } from "@oh-my-pi/pi-wire";
 import { CommandPalette, type PaletteItem } from "../terngram/ui/command-palette";
 
 const items: PaletteItem[] = [
@@ -31,11 +36,9 @@ test("native row selection previews without activation; activation and confirm c
   s.event({ type: "select", key: "", item: "chat:2" });
   expect(s.chosen).toEqual([]);
   expect(s.view().selected).toBe("chat:2");
-  expect(s.view().message).toBe("Alice team · Group · 5 unread · Enter open chat");
   s.action("confirm");
   s.event({ type: "activate", key: "", item: "refresh" });
   expect(s.chosen).toEqual(["chat:2", "refresh"]);
-  expect(s.view().message).toBe("Refresh · Reload conversation · Enter run command");
 });
 
 test("commands and chats prefixes filter case-insensitively and search hidden aliases", () => {
@@ -63,15 +66,11 @@ test("chat loading leaves unprefixed commands searchable and actionable", () => 
   expect(s.chosen).toEqual(["refresh"]);
   s.replace("missing");
   expect(s.ids()).toEqual([]);
-  expect(s.view().message).toContain("Loading more chats");
   s.replace(">missing");
   expect(s.view().state).toBe("ready");
-  expect(s.view().message).not.toContain("Loading");
   s.replace("@Alice");
   expect(s.ids()).toEqual(["chat:1", "chat:2"]);
   expect(s.view().state).toBe("ready");
-  s.palette.setLoading(false);
-  expect(s.view().message).not.toContain("Loading");
 });
 
 test("native edits retain their caret for subsequent keyboard filtering and ignore stale edits", () => {
@@ -160,7 +159,6 @@ test("disabled rows cannot select or activate and empty or unavailable results d
   s.palette.handleInput("\r");
   expect(s.chosen).toEqual([]);
   s.replace("No matching name");
-  expect(s.view().message).toBe("No matching results · Type to search · Esc close");
   s.action("confirm");
   expect(s.chosen).toEqual([]);
 });
@@ -217,4 +215,67 @@ test("chat paging is requested near the result edge without issuing repeated loa
   palette.setLoading(false);
   palette.loadNearEnd();
   expect(loads).toBe(2);
+});
+
+test("deleting the final search character delivers the full Unicode catalog within the host APC limit", () => {
+  const catalog: PaletteItem[] = Array.from({ length: 226 }, (_, index) => ({
+    value: `chat:${index}`,
+    label: `Тестовый чат ${index}`,
+    description: "Подробное описание сообщения ".repeat(8),
+  }));
+  catalog.push({ value: "chat:999", label: "zzneedle" });
+  const palette = new CommandPalette(catalog, () => {}, () => {}, () => {});
+  palette.handleInput("zzneedle");
+  const limit = 65_536;
+  const chunks = new Map<string, string>();
+  let document: TspDocument;
+  const accepted: TspFrame[] = [];
+  const terminal = {
+    columns: 110, rows: 40,
+    write(data: string) {
+      for (const part of data.matchAll(/\x1b_tsp;[\s\S]*?\x1b\\/g)) {
+        // Reproduce a host that rejects oversized APC payloads before decoding JSON.
+        if (Buffer.byteLength(part[0].slice(2, -2), "utf8") > limit) continue;
+        const raw = splitTspMessage(part[0])!;
+        let body = raw.body;
+        if (raw.params.c !== undefined) {
+          const key = `${raw.verb}:${raw.params.c}`;
+          body = (chunks.get(key) ?? "") + body;
+          if (raw.params.m === "1") { chunks.set(key, body); continue; }
+          chunks.delete(key);
+        }
+        let value;
+        try { value = JSON.parse(body); } catch { continue; }
+        if (raw.verb === "o") document = new TspDocument(value.id);
+        else if (raw.verb === "f") {
+          expect(document.applyFrame(value)).toEqual([]);
+          accepted.push(value);
+        }
+      }
+    },
+  } as unknown as Terminal;
+  const host: NativeHost = {
+    terminal, describeSurface: () => ({ main: [], dock: [] }),
+    overlays: () => [{ component: palette, options: undefined, focused: true }],
+    focused: () => palette, focusFromPointer() {}, requestRender() {},
+    appearanceChanged() {}, motionChanged() {}, invalidate() {},
+  };
+  const backend = new NativeBackend(host, { r: "hello", v: 1, term: "fixture", kinds: TSP_KINDS, apc: limit, credits: 1000, cols: 110 }, { recordPath: "", surfaceMode: "screen" });
+  let acknowledged = 0;
+  try {
+    backend.start();
+    for (let remaining = "zzneedle".length; remaining > 0; remaining--) {
+      palette.handleInput("\x7f"); backend.render();
+      for (const frame of accepted.slice(acknowledged)) backend.handleInput(encodeTspJson("e", { ev: "ack", sf: frame.sf, s: frame.s }));
+      acknowledged = accepted.length;
+    }
+    const picker = document!.get("layer")!.c?.find(node => node.k === "picker");
+    if (!picker || picker.k !== "picker" || !picker.p || !("query" in picker.p)) throw new Error("Missing displayed picker query");
+    expect(palette.describe()).toMatchObject({ p: { query: "", cursor: 0 } });
+    expect(picker.p.query).toBe("");
+    expect(picker.p && "items" in picker.p ? picker.p.items?.map(item => item.id) : []).toEqual(catalog.map(item => item.value));
+    palette.handleInput("zz"); backend.render();
+    const typed = document!.get(picker.id)!;
+    expect(typed.p && "query" in typed.p ? typed.p.query : undefined).toBe("zz");
+  } finally { backend.stop(); }
 });

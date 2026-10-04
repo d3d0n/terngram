@@ -8,14 +8,14 @@ type ImageEntry = { requested: boolean; node?: NativeNode | null };
  */
 export class ImageLoader {
   private entries = new Map<string, ImageEntry>();
-  private queue: { key: string; entry: ImageEntry; load: () => Promise<NativeNode | null> }[] = [];
+  private queue: { key: string; entry: ImageEntry; load: (current: () => boolean) => Promise<NativeNode | null> }[] = [];
   private active = 0;
 
   constructor(private concurrency: number, private loaded: () => void, private failed: (error: unknown) => void) {}
 
   get(key: string): NativeNode | null | undefined { return this.entries.get(key)?.node; }
 
-  request(key: string, load: () => Promise<NativeNode | null>): void {
+  request(key: string, load: (current: () => boolean) => Promise<NativeNode | null>): void {
     if (this.entries.get(key)?.requested) return;
     const entry: ImageEntry = { requested: true };
     this.entries.set(key, entry); this.queue.push({ key, entry, load }); this.pump();
@@ -39,7 +39,7 @@ export class ImageLoader {
       const { key, entry, load } = this.queue.pop()!;
       if (this.entries.get(key) !== entry) continue;
       this.active++;
-      void load().then(
+      void load(() => this.entries.get(key) === entry).then(
         node => { if (this.entries.get(key) === entry) entry.node = node; },
         error => { if (this.entries.get(key) === entry) { entry.requested = false; this.failed(error); } },
       ).finally(() => {

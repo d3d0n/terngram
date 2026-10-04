@@ -1,0 +1,83 @@
+[tools]
+bun = "1.4.2"
+uv = "0.12.23"
+ruff = "0.16.10"
+
+[tasks.deps]
+description = "Install locked UI and Python dependencies (Python is managed by uv)"
+run = ["bun install --frozen-lockfile", "uv sync --frozen"]
+
+[tasks.start]
+description = "Launch the native client inside Tern; forwards CLI arguments"
+depends = ["deps"]
+raw = true
+run = "uv run --frozen terngram"
+
+[tasks.typecheck]
+description = "Check TypeScript contracts"
+depends = ["deps"]
+run = "bun x --no-install tsc --noEmit"
+
+[tasks."lint:python"]
+description = "Check Python syntax and runtime-error rules with Ruff"
+run = "ruff check terngram scripts tests"
+
+[tasks."lint:shell"]
+description = "Check release launcher shell syntax"
+run = "sh -n scripts/launch_release.sh && sh -n packaging/macos/terngram"
+
+[tasks.lint]
+description = "Check TypeScript contracts, Python errors and shell syntax"
+depends = ["typecheck", "lint:python", "lint:shell"]
+
+[tasks."test:ui"]
+description = "Run Bun tests; accepts test paths and Bun flags"
+depends = ["deps"]
+run = "bun test"
+
+[tasks."test:python"]
+description = "Run Python unittest discovery; accepts discovery flags"
+depends = ["deps"]
+run = "uv run --frozen python -m unittest discover -s tests"
+
+[tasks.test]
+description = "Run UI and Python fixture suites"
+depends = ["test:ui", "test:python"]
+
+[tasks.smoke]
+description = "Exercise the native backend and isolated worker without an account"
+depends = ["deps"]
+run = "bun .smoke-client.ts"
+
+[tasks.check]
+description = "Run lint, tests and native fixture smoke"
+depends = ["lint", "test", "smoke"]
+
+[tasks.build]
+description = "Package macOS arm64 runtimes; pass --tdlib and any builder flags"
+depends = ["deps"]
+run = 'uv run --frozen python -B scripts/build_release.py --bun "$(command -v bun)"'
+
+[tasks."release:verify"]
+description = "Verify a ZIP or package directory using relocated bundled runtimes"
+usage = 'arg "<artifact>" help="Release ZIP with checksum sidecar, or unpacked package"'
+run = '''
+set -eu
+version=$(uv run --frozen python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+uv run --frozen python -B scripts/verify_release.py "$usage_artifact" . --expected-version "$version"
+'''
+
+[tasks.release]
+description = "Check, package and verify a local macOS arm64 release; does not publish"
+depends = ["check"]
+usage = '''
+arg "<tdlib>" help="Official arm64 libtdjson.dylib" env="TERNGRAM_TDLIB_LIBRARY"
+flag "--output-dir <dir>" help="Archive destination; existing releases are never overwritten" default="dist"
+flag "--staging-dir <dir>" help="Builder-owned staging parent" default="build/macos-release"
+'''
+run = '''
+set -eu
+version=$(uv run --frozen python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+mise run build --tdlib "$usage_tdlib" --expect-version "$version" --output-dir "$usage_output_dir" --staging-dir "$usage_staging_dir"
+mise run release:verify "$usage_output_dir/terngram-$version-macos-arm64.zip"
+'''

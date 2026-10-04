@@ -30,6 +30,16 @@ After dependency installation, inspect these **local package source paths** when
 - `native/backend.ts`, `native/reconcile.ts`, `native/encode.ts`: transport, event routing, identity, diffing and APC encoding.
 - `tui.ts`: component, overlay and focus lifecycle; `native/apply.ts`: reference document, not a renderer.
 
+## APC payload limits and large updates
+
+The negotiated hello `apc` limit is enforced on each UTF-8 APC payload, including `tsp`, the verb, separators and parameters; `ESC _` and terminating `ST` are outside the payload. The pinned SDK encoder patch subtracts this overhead before taking the small-message fast path or splitting a logical message. Chunked messages additionally reserve `c=<id>` and `m=1`; blob IDs and MIME parameters count too. Splits remain on Unicode code-point boundaries and reconstruct the original logical body without changing query/caret/data.
+
+A cleared palette query can expand one filtered result into the full Unicode dialog catalog. This can require several APC parts even when the search text itself is empty. Oversized parts can be rejected before JSON/frame decoding, leaving a previous picker query or document visible while application keyboard/model updates continue. ACK means receipt, not successful application of every op or painted geometry; a host `error` must not be dismissed because an ACK also arrived. There is no Backspace-specific redraw or periodic surface reset in this fix.
+
+`tests/tsp-encoding.test.ts` covers UTF-8 header-inclusive limits, the unchunked boundary and blob parameters. The palette regression drives the real palette/backend/reference document through final-character deletion and new typing with 227 synthetic items and a strict 65,536-byte receiver. These tests establish codec/model behavior, not every host parser or compositor path.
+
+Compact preview truncation must also preserve UTF-16 surrogate pairs. A `slice(0, n)` ending after half an emoji produces an escaped lone surrogate in JSON; Tern's Rust parser rejects that frame (`malformed f body: unexpected end of hex escape`) even if its APC sizes are valid. `nodes.preview()` backs the cutoff off by one code unit only when it splits a pair; palette/reply previews use it at 120 units and forwarding destinations at 160. `tests/previews.test.ts` covers both boundaries. An isolated actual Tern renderer rejected the split-emoji picker and accepted/painted the corrected one, unlike a JavaScript-only JSON/reference-document receiver.
+
 ## Describe contract and stable identity
 
 A component implements `describe(cx): NativeNode | null`. Nodes have `k` (kind), `p` (kind-specific props), `c` (nodes or component children), and optional **top-level** `key`, `reveal` and `scroll`. The reconciler assigns wire IDs; do not replace them with Telegram IDs.
@@ -50,7 +60,7 @@ A component without `describe` falls back to `rows` and calls `render(cx.cols)`.
 | Construct | Ownership/meaning |
 | --- | --- |
 | Surface | SDK-owned ID; wire `o` opens/adopts `inline` or `screen`, `x` closes |
-| `main` | Flowing document; close with `keep: true` can retain it in scrollback |
+| `main` | Flowing content; an inline surface closed with `keep: true` can retain it in scrollback |
 | `dock` | Sticky bottom chrome while the surface is live |
 | `layer` | Wire overlay region, managed by SDK backend |
 | Generic overlay | `tui.showOverlay(component)` wraps it in an `overlay` node in `layer` |
@@ -58,6 +68,8 @@ A component without `describe` falls back to `rows` and calls `render(cx.cols)`.
 | Screen page | `describeScreen(cx)` supplies `main`, `dock` and `role` for a separate screen surface |
 
 `NativeSurface` contains **only `main` and `dock`**; do not add `layer`. Terngram returns `{ main: [this.body], dock: [this] }`, and the SDK manages gallery/help overlays and palette/forward sheets. `dockedPicker()` can hoist a selector from dock/editor into layer; use `pickerEvent` to normalize its special keypath.
+
+Terngram selects `new TUI(terminal, false, { nativeSurfaceMode: "screen" })`. The pinned SDK patch forwards this to `NativeBackendOptions.surfaceMode`; the SDK default remains `inline` for transcript clients and the standalone focus probe. Root placement is separate from overlay modality, so existing keyboard/pointer routing is unchanged. The patch preserves placement on `gone`, opens a fresh screen rather than adopting scrollback on resume, and always closes screen roots with `keep: false`. Source and shipped declaration files are patched together. Offline lifecycle coverage is in `tests/native-surface.test.ts`; native tree/ACK checks do not establish painted host behavior.
 
 The whole dock is sticky, not an arbitrary editor inside it. Large lists or multiline content increase dock content; the API does not establish a fixed-height independent panel or top-dock/header. Generic anchor (`center/top/bottom`, node side or caret) and size (`sm/md/lg/full`) are semantic hints, not pixel offsets. Native sheet is not a screen merely because an overlay option says fullscreen.
 
@@ -126,7 +138,7 @@ Terngram uses `Input`, `SelectList` and `SelectListSheet(..., { docked: false })
 
 ## Scroll is not Telegram pagination
 
-`reveal: start/end/nearest` applies when a node is **added**. Changing reveal on an existing node is not another scroll command; replacing its key creates new identity and may lose host view state. Terngram uses a new keyed tail anchor for first latest and a selection anchor for selected cards.
+`reveal: start/end/nearest` applies when a node is **added**. Changing reveal on an existing node is not another scroll command; replacing its key creates new identity and may lose host view state. Terngram uses a new keyed tail anchor for first latest and a selection anchor for selected cards. Tail reveal is emitted only for the selected chat, never its hidden cached siblings; latest clears the previous message selection so screen reconstruction cannot reveal that historical selection again.
 
 For repeatable keyboard scroll keep the node key and change `scroll.n`:
 
@@ -140,6 +152,8 @@ function thread(children: NativeNode[], n: number): NativeNode {
 ```
 
 `by` is line-up/down, page-up/down, start or end. It targets the scroller at or above the node; the wire comment defines a page as viewport less a line. Freshly added nodes do not scroll. Changed counters on an existing node repeat the latest direction for accumulated presses, capped at 32 operations per node/frame; start/end emit once. Scroll ops require hello feature `scroll`.
+
+The pinned reconciler patch suppresses `scroll` ops for nodes with `p.hidden === true` while still remembering their newest counter. Showing that node alone therefore cannot replay an old page command into the currently active viewport. Terngram keeps the thread's stable key/counter; it does not reset counters or rebuild the whole chat just to prevent scrolling. `tests/native-surface.test.ts` covers hidden-command consumption and normal visible paging/latest, and the native smoke covers latest → cached chat → screen rebuild → late decoration without hidden reveals or stale selection.
 
 Ctrl+U/D requests viewport movement only with messages focused. Loading older messages is a separate backend history operation. Latest explicitly follows end and updates read state; incoming events do not forcibly reveal latest. `ansi.follow` belongs to ANSI blocks, not `col/md` transcripts.
 
@@ -199,6 +213,10 @@ An optimistic `assumedTspHello` from `TERM_PROGRAM=tern` is not actual capabilit
 ## Evidence and integration checklist
 
 The SDK mirror and `TspDocument` apply frames to a reference tree; they do not render a window. The [offline smoke harness](../.smoke-client.ts) uses synthetic hello, controlled Telegram responses and artificial ACKs. It can check keys/props/regions, operations, blob-before-frame, focus routing, paging intent and app state transitions. It cannot establish real hello compatibility, live Telegram delivery, precise dock/card/image size, clipping, smooth scroll, trackpad visibility, actual pointer behavior or host zoom. Use [development.md](development.md) for checks, then observe geometry in real Tern with safe fixtures; do not publish private traces.
+
+For real-host focus investigation without account content, use the [isolated focus event probe](development.md#capture-tern-focus-events-without-an-account). It records sanitized incoming event metadata before SDK dispatch and outgoing focus/frame summaries; it does not record raw frames, input text or pixels. It can distinguish an absent event from a received event the SDK ignores, but does not itself establish the host's window/pane focus contract.
+
+The same recorder can observe the [real application with `--debug-log`](development.md#verbose-application-logging), adding local stage/busy/component/overlay state and interceptor before/after decisions without changing focus policy. Wire identities are session-local aliases; raw payloads and auth edit sizes are omitted. `input_route` describes app interception, not whether the focused component handled the key; `dispatch`/`model_edit` and outgoing frames supply the subsequent evidence. These are protocol/model observations, not painted geometry or host foreground detection.
 
 When changing native integration:
 

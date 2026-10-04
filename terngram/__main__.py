@@ -20,6 +20,10 @@ def main() -> None:
         default=Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "terngram",
         help="private account data directory (default: ~/.local/share/terngram)",
     )
+    parser.add_argument(
+        "--debug-log", type=Path,
+        help="record verbose, content-free application diagnostics to a new JSONL file (never overwritten)",
+    )
     args = parser.parse_args()
     bun = shutil.which("bun")
     if bun is None:
@@ -28,7 +32,12 @@ def main() -> None:
     root = frontend.parent.parent.parent
     if not (root / "node_modules/@oh-my-pi/pi-tui/package.json").is_file():
         parser.error("Native UI dependencies are missing. Run bun install in the terngram project first.")
-    os.execv(bun, [bun, str(frontend), "--python", sys.executable, "--data-dir", str(args.data_dir.expanduser().absolute())])
+    command = [bun, str(frontend), "--python", sys.executable, "--data-dir", str(args.data_dir.expanduser().absolute())]
+    if args.debug_log is not None:
+        command += ["--debug-log", str(args.debug_log.expanduser().absolute())]
+        os.environ.pop("PI_TUI_TSP_RECORD", None)
+        os.environ.pop("OMP_TUI_DEBUG", None)
+    os.execv(bun, command)
 
 
 if __name__ == "__main__":

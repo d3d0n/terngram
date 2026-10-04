@@ -73,7 +73,8 @@ async def serve(data_dir: Path) -> None:
             emit({"id": request_id, "result": result})
         except ClientError as exc:
             cooldown = retry_after(exc)
-            emit({"id": request_id, "error": str(exc), "error_code": service.record_error(method, exc),
+            code = exc.code if exc.code == "MEDIA_CHANGED" else service.record_error(method, exc)
+            emit({"id": request_id, "error": str(exc), "error_code": code,
                   **({"retry_after": cooldown, "retry_scope": retry_scope(exc)} if cooldown is not None else {})})
         except Exception as exc:
             cooldown = retry_after(exc)

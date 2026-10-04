@@ -2,6 +2,9 @@ import { expect, test } from "bun:test";
 import { EventEmitter, once } from "node:events";
 import type { NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { ImageLoader } from "../terngram/ui/image-loader";
+import { TerngramApp } from "../terngram/ui/app";
+import { type ChatMessage, type Photo, TelegramRequestError } from "../terngram/ui/telegram";
+import { PhotoViewer } from "../terngram/ui/photo-viewer";
 
 const image = (key: string): NativeNode => ({ k: "image", key, p: { alt: key } });
 function setup(concurrency: number) {
@@ -172,4 +175,182 @@ test("leaving a chat drops queued decoration without discarding active or comple
   expect(loader.get("active")?.key).toBe("active");
   expect(loader.get("new-chat")?.key).toBe("new");
   expect(loader.get("old-queued")).toBeUndefined();
+});
+
+const fixturePhoto: Photo = { data: "aW1hZ2U=", mime: "image/png", width: 1, height: 1 };
+const photoMessage = (media_id: string): ChatMessage => ({
+  id: 1, chat_id: 42, sender: "Fixture", text: "", time: "", outgoing: false,
+  reply_to: null, edited: false, photo: true, media_id, forwarded: null, read: false,
+  grouped_id: null, sender_id: null, markdown: "", entities: [],
+});
+type PhotoApp = {
+  generation: number;
+  telegram: { call: (method: string, args: unknown[]) => Promise<Photo | null> };
+  previews: ImageLoader;
+  photoNodes: Map<string, NativeNode>;
+  queuePreviews: (id: number) => void;
+  invalidatePhoto: (message: ChatMessage) => void;
+  viewPhoto: (message: ChatMessage) => Promise<void>;
+};
+function photoApp(call: PhotoApp["telegram"]["call"]) {
+  let messages = [photoMessage("old")];
+  const errors: unknown[] = [];
+  const thread = { getMessage: (id: number) => messages.find(item => item.id === id), get groups() { return [messages]; } };
+  const app = Object.assign(Object.create(TerngramApp.prototype), {
+    generation: 1, telegram: { call }, selectedId: 42, quitting: false,
+    cooldowns: { remaining: () => 0 }, threads: new Map([[42, thread]]),
+    thread: () => thread, albumMembers: () => messages, redraw: () => {},
+    fail: (error: unknown) => errors.push(error), photoNodes: new Map(),
+    photoLoading: new Map(), photoIntent: 0, resolvedAlbums: new Set(), palette: {},
+    previews: new ImageLoader(2, () => {}, error => errors.push(error)),
+  }) as PhotoApp;
+  return { app, errors, replace: (next: ChatMessage[]) => { messages = next; } };
+}
+const flushImages = () => new Promise<void>(resolve => setImmediate(resolve));
+
+
+test("expected preview invalidation preserves an already queued replacement and evicts old full bytes", async () => {
+  const stale = Promise.withResolvers<Photo | null>();
+  const replacement = Promise.withResolvers<Photo | null>();
+  let calls = 0;
+  const s = photoApp(async () => ++calls === 1 ? stale.promise : replacement.promise);
+  s.app.photoNodes.set("42:1:old", image("old"));
+  s.app.queuePreviews(42);
+  s.replace([photoMessage("new")]);
+  s.app.invalidatePhoto(photoMessage("old"));
+  s.app.queuePreviews(42);
+  stale.reject(new TelegramRequestError("photo", "Changed", 0, "MEDIA_CHANGED"));
+  await flushImages();
+  expect(calls).toBe(2);
+  expect(s.errors).toEqual([]);
+  expect(s.app.photoNodes.has("42:1:old")).toBe(false);
+  replacement.resolve(fixturePhoto);
+  await flushImages();
+  expect(s.app.previews.get("42:1:old")).toBeUndefined();
+  expect(s.app.previews.get("42:1:new")?.k).toBe("image");
+});
+
+test("removed preview becomes absent, while genuine failures remain visible and are not retried", async () => {
+  for (const code of ["MEDIA_CHANGED", "MEDIA_RESTRICTED"]) {
+    const pending = Promise.withResolvers<Photo | null>();
+    let calls = 0;
+    const s = photoApp(async () => { calls++; return pending.promise; });
+    s.app.queuePreviews(42);
+    if (code === "MEDIA_CHANGED") s.replace([{ ...photoMessage("old"), photo: false, media_id: null }]);
+    const error = new TelegramRequestError("photo", "Fixture error", 0, code);
+    pending.reject(error);
+    await flushImages();
+    expect(calls).toBe(1);
+    expect(s.errors).toEqual(code === "MEDIA_CHANGED" ? [] : [error]);
+    expect(s.app.previews.get("42:1:old")).toBeUndefined();
+  }
+});
+
+test("old account invalidation cannot evict a newer account's same-key caches", async () => {
+  const pending = Promise.withResolvers<Photo | null>();
+  const s = photoApp(async () => pending.promise);
+  s.app.queuePreviews(42);
+  s.app.generation++;
+  s.app.previews.clear();
+  s.app.photoNodes.set("42:1:old", image("new-account-full"));
+  s.app.previews.request("42:1:old", async () => image("new-account-preview"));
+  await flushImages();
+  pending.reject(new TelegramRequestError("photo", "Changed", 0, "MEDIA_CHANGED"));
+  await flushImages();
+  expect(s.app.photoNodes.get("42:1:old")?.key).toBe("new-account-full");
+  expect(s.app.previews.get("42:1:old")?.key).toBe("new-account-preview");
+  expect(s.errors).toEqual([]);
+});
+
+test("gallery continues using authoritative replacement members after expected invalidation", async () => {
+  const pending = Promise.withResolvers<Photo | null>();
+  let fullCalls = 0;
+  const s = photoApp(async (_method, args) => {
+    if (args[2] === true) return null;
+    return ++fullCalls === 1 ? pending.promise : fixturePhoto;
+  });
+  const opening = s.app.viewPhoto(photoMessage("old"));
+  s.replace([photoMessage("new")]);
+  pending.reject(new TelegramRequestError("photo", "Changed", 0, "MEDIA_CHANGED"));
+  await opening;
+  expect(fullCalls).toBe(2);
+  expect(s.app.photoNodes.has("42:1:old")).toBe(false);
+  expect(s.app.photoNodes.get("42:1:new")?.k).toBe("image");
+  expect(s.errors).toEqual([]);
+});
+
+test("gallery drops removed members without retrying, placeholders, or errors", async () => {
+  const pending = Promise.withResolvers<Photo | null>();
+  let calls = 0;
+  const s = photoApp(async () => { calls++; return pending.promise; });
+  const opening = s.app.viewPhoto(photoMessage("old"));
+  s.replace([]);
+  pending.reject(new TelegramRequestError("photo", "Changed", 0, "MEDIA_CHANGED"));
+  await opening;
+  expect(calls).toBe(1);
+  expect(s.app.photoNodes.size).toBe(0);
+  expect(s.errors).toEqual([]);
+});
+
+test("gallery genuine failures surface once without retrying", async () => {
+  const error = new TelegramRequestError("photo", "Restricted", 0, "MEDIA_RESTRICTED");
+  let calls = 0;
+  const s = photoApp(async () => { calls++; throw error; });
+  await s.app.viewPhoto(photoMessage("old"));
+  expect(calls).toBe(1);
+  expect(s.errors).toEqual([error]);
+  expect(s.app.photoNodes.size).toBe(0);
+});
+
+test("late expected preview cancellation cannot evict a newer same-key entry", async () => {
+  const stale = Promise.withResolvers<Photo | null>();
+  const fresh = Promise.withResolvers<Photo | null>();
+  let calls = 0;
+  const s = photoApp(async () => ++calls === 1 ? stale.promise : fresh.promise);
+  s.app.queuePreviews(42);
+  s.app.invalidatePhoto(photoMessage("old"));
+  s.app.queuePreviews(42);
+  fresh.resolve(fixturePhoto);
+  await flushImages();
+  s.app.photoNodes.set("42:1:old", image("fresh-full"));
+  stale.reject(new TelegramRequestError("photo", "Changed", 0, "MEDIA_CHANGED"));
+  await flushImages();
+  expect(calls).toBe(2);
+  expect(s.app.previews.get("42:1:old")?.k).toBe("image");
+  expect(s.app.photoNodes.get("42:1:old")?.key).toBe("fresh-full");
+  expect(s.errors).toEqual([]);
+});
+
+test("media cache invalidation immediately removes the viewer's stale node reference", () => {
+  const s = photoApp(async () => fixturePhoto);
+  const oldImage = image("old");
+  const viewer = new PhotoViewer([oldImage], [""], () => {});
+  Object.assign(s.app, { photoViewer: viewer, photoGroup: photoMessage("old") });
+  s.app.photoNodes.set("42:1:old", oldImage);
+  s.replace([photoMessage("new")]);
+  s.app.invalidatePhoto(photoMessage("old"));
+  expect(viewer.describe().c?.filter(child => "k" in child && child.k === "image")).toEqual([]);
+});
+
+test("same-key preview cancellation reloads the visible gallery after evicting its full image", async () => {
+  const pending = Promise.withResolvers<Photo | null>();
+  let previews = 0, full = 0;
+  const s = photoApp(async (_method, args) => {
+    if (args[2] === true) return ++previews === 1 ? pending.promise : fixturePhoto;
+    full++;
+    return fixturePhoto;
+  });
+  const oldImage = image("old");
+  const viewer = new PhotoViewer([oldImage], [""], () => {});
+  Object.assign(s.app, { photoViewer: viewer, photoGroup: photoMessage("old"), photoIntent: 1, photoDisplayedIntent: 1 });
+  s.app.photoNodes.set("42:1:old", oldImage);
+  s.app.queuePreviews(42);
+  pending.reject(new TelegramRequestError("photo", "Changed", 0, "MEDIA_CHANGED"));
+  await flushImages();
+  expect(full).toBe(1);
+  const refreshed = s.app.photoNodes.get("42:1:old");
+  if (refreshed?.k !== "image") throw new Error("Current gallery image did not reload");
+  expect(refreshed).not.toBe(oldImage);
+  expect(viewer.describe().c?.filter(child => "k" in child && child.k === "image")).toEqual([refreshed]);
+  expect(s.errors).toEqual([]);
 });

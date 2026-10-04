@@ -1,8 +1,94 @@
+diff --git a/node_modules/@oh-my-pi/pi-tui/.bun-tag-120926b4e8e93cc6 b/.bun-tag-120926b4e8e93cc6
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-tui/.bun-tag-6ae5c80110e57691 b/.bun-tag-6ae5c80110e57691
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-tui/.bun-tag-9897d523e76f5898 b/.bun-tag-9897d523e76f5898
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@oh-my-pi/pi-tui/.bun-tag-e836e05eec26e7da b/.bun-tag-e836e05eec26e7da
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/types/native/backend.d.ts b/dist/types/native/backend.d.ts
+index e000f7db570f8f9a8a01ccc2a6f89a6ba13003ff..ce3c261df3c814c347c8be7053f876ad87fdacc4 100644
+--- a/dist/types/native/backend.d.ts
++++ b/dist/types/native/backend.d.ts
+@@ -36,6 +36,8 @@ export interface NativeHost {
+     invalidate(): void;
+ }
+ export interface NativeBackendOptions {
++    /** Root placement: scrollback document by default, or a standalone screen. */
++    readonly surfaceMode?: "inline" | "screen";
+     /** Keep the reference document and recent frames for debugging. */
+     readonly mirror?: boolean;
+     /** Append every TSP message to this JSONL file. Defaults to `PI_TUI_TSP_RECORD`. */
+@@ -62,7 +64,7 @@ export declare class NativeBackend {
+     /** `rows` fallback nodes in the last frame. */
+     get fallbackCount(): number;
+     /**
+-     * Open the inline surface and send the first frame. Native rendering is
++     * Open the root surface and send the first frame. Native rendering is
+      * announced only once the surface is open: Tern drops the shell's title
+      * when a command's first surface opens, so the tab title set on the change
+      * has to follow the `o`.
+@@ -70,13 +72,13 @@ export declare class NativeBackend {
+     start(): void;
+     /**
+      * Close every surface. The inline transcript stays in scrollback unless
+-     * `keep` is false (a revoked optimistic start: rows repaint from scratch).
++     * `keep` is false; standalone screen surfaces are always discarded.
+      */
+     stop(keep?: boolean): void;
+     /**
+      * After a stop/start cycle (external editor, suspend): adopt the closed
+      * inline surface so the transcript continues in place instead of being
+-     * printed again. A `gone` reply for it opens a fresh surface.
++     * printed again. Screens reopen fresh; `gone` preserves the root mode.
+      */
+     resume(hello: TspHello): void;
+     /**
+diff --git a/dist/types/native/encode.d.ts b/dist/types/native/encode.d.ts
+index 3468511ebbeacdc104ab959a88a238a1d97736bb..382268f4a30c36f6e5b54a2d364ced41a8cc53a8 100644
+--- a/dist/types/native/encode.d.ts
++++ b/dist/types/native/encode.d.ts
+@@ -18,7 +18,8 @@ export type TspParams = Readonly<Record<string, string | number>>;
+ /** Split `body` into pieces of at most `limit` UTF-8 bytes, never inside a code point. */
+ export declare function splitUtf8(body: string, limit: number): string[];
+ /**
+- * Encode one logical message, chunked when `body` exceeds `limit` UTF-8 bytes.
++ * Encode one logical message within `limit` UTF-8 bytes per APC payload,
++ * including identifier/verb/parameters but excluding ESC _ and ST.
+  * Returns the complete byte string to write (all chunks, in order).
+  */
+ export declare function encodeTspMessage(verb: TspVerb, body: string, params?: TspParams, limit?: number): string;
+diff --git a/dist/types/tui.d.ts b/dist/types/tui.d.ts
+index 611857ca3be69eee9ad0778575db56964b5b1f19..593adf2701120c3c4a0da4e9d380491063a8e42b 100644
+--- a/dist/types/tui.d.ts
++++ b/dist/types/tui.d.ts
+@@ -37,6 +37,8 @@ export type PaintListener = (paint: TuiPaint) => void;
+ export interface TUIOptions {
+     renderScheduler?: RenderScheduler;
+     onPaint?: PaintListener;
++    /** Native root placement; inline scrollback remains the default. */
++    nativeSurfaceMode?: "inline" | "screen";
+ }
+ /** Physical terminal dimensions supplied to a frame provider. */
+ export interface ViewportSize {
 diff --git a/src/native/backend.ts b/src/native/backend.ts
-index bbc5c45f76dba8d27314504195bb09ec5f17e1bc..41f0d6c2f78dc59c5e9ac47f762c3ad11dab6238 100644
+index bbc5c45f76dba8d27314504195bb09ec5f17e1bc..fe2ba74ed151b6b0290b255082e735c3f3fc4f5d 100644
 --- a/src/native/backend.ts
 +++ b/src/native/backend.ts
-@@ -185,7 +185,8 @@ class Surface {
+@@ -86,6 +86,8 @@ export interface NativeHost {
+ }
+ 
+ export interface NativeBackendOptions {
++	/** Root placement: scrollback document by default, or a standalone screen. */
++	readonly surfaceMode?: "inline" | "screen";
+ 	/** Keep the reference document and recent frames for debugging. */
+ 	readonly mirror?: boolean;
+ 	/** Append every TSP message to this JSONL file. Defaults to `PI_TUI_TSP_RECORD`. */
+@@ -185,7 +187,8 @@ class Surface {
  	/** Send times of unacknowledged frames, oldest first. */
  	unacked: number[] = [];
  	uploaded = new Set<string>();
@@ -12,7 +98,79 @@ index bbc5c45f76dba8d27314504195bb09ec5f17e1bc..41f0d6c2f78dc59c5e9ac47f762c3ad1
  	dirty = false;
  
  	constructor(id: string, mode: "inline" | "screen", role: string, mirror: boolean) {
-@@ -650,8 +651,14 @@ export class NativeBackend {
+@@ -266,7 +269,7 @@ export class NativeBackend {
+ 		this.#recordPath = options.recordPath ?? (Bun.env.PI_TUI_TSP_RECORD || undefined);
+ 		this.#stats = options.stats ?? Bun.env.PI_TUI_NATIVE_STATS === "1";
+ 		this.#scheduler = options.scheduler ?? DEFAULT_SCHEDULER;
+-		this.#inline = this.#newSurface("inline");
++		this.#inline = this.#newSurface(options.surfaceMode ?? "inline");
+ 	}
+ 
+ 	/** The terminal's hello reply. */
+@@ -285,7 +288,7 @@ export class NativeBackend {
+ 	}
+ 
+ 	/**
+-	 * Open the inline surface and send the first frame. Native rendering is
++	 * Open the root surface and send the first frame. Native rendering is
+ 	 * announced only once the surface is open: Tern drops the shell's title
+ 	 * when a command's first surface opens, so the tab title set on the change
+ 	 * has to follow the `o`.
+@@ -353,14 +356,14 @@ export class NativeBackend {
+ 
+ 	/**
+ 	 * Close every surface. The inline transcript stays in scrollback unless
+-	 * `keep` is false (a revoked optimistic start: rows repaint from scratch).
++	 * `keep` is false; standalone screen surfaces are always discarded.
+ 	 */
+ 	stop(keep = true): void {
+ 		if (!this.#live) return;
+ 		this.#live = false;
+ 		if (this.#screen) this.#close(this.#screen, false);
+ 		this.#screen = null;
+-		this.#close(this.#inline, keep);
++		this.#close(this.#inline, this.#inline.mode === "inline" && keep);
+ 		this.#inline.doc?.close();
+ 		setNativeRendering(false);
+ 		this.#unbindTheme?.();
+@@ -372,7 +375,7 @@ export class NativeBackend {
+ 	/**
+ 	 * After a stop/start cycle (external editor, suspend): adopt the closed
+ 	 * inline surface so the transcript continues in place instead of being
+-	 * printed again. A `gone` reply for it opens a fresh surface.
++	 * printed again. Screens reopen fresh; `gone` preserves the root mode.
+ 	 */
+ 	resume(hello: TspHello): void {
+ 		if (this.#live) return;
+@@ -381,14 +384,19 @@ export class NativeBackend {
+ 		this.#live = true;
+ 		this.#useNerdSymbols(true);
+ 		this.#watchTheme();
+-		const surface = this.#inline;
+-		surface.reconciler.detachLive();
+-		surface.unacked = [];
+-		surface.acked = surface.seq;
+-		surface.focus = null;
+-		surface.dirty = false;
+-		this.#write("o", { id: surface.id, mode: "inline", title: "omp", role: SESSION_ROLE, adopt: true });
+-		this.#sendPalette(surface);
++		if (this.#inline.mode === "screen") {
++			this.#inline = this.#newSurface("screen", this.#inline.role);
++			this.#open(this.#inline);
++		} else {
++			const surface = this.#inline;
++			surface.reconciler.detachLive();
++			surface.unacked = [];
++			surface.acked = surface.seq;
++			surface.focus = null;
++			surface.dirty = false;
++			this.#write("o", { id: surface.id, mode: "inline", title: "omp", role: surface.role, adopt: true });
++			this.#sendPalette(surface);
++		}
+ 		// After the `o`, as in `start()`.
+ 		setNativeRendering(true);
+ 		this.render();
+@@ -650,15 +658,21 @@ export class NativeBackend {
  				this.#cx.reduceMotion = event.reduce;
  				this.#host.motionChanged(event.reduce);
  				return;
@@ -28,3 +186,112 @@ index bbc5c45f76dba8d27314504195bb09ec5f17e1bc..41f0d6c2f78dc59c5e9ac47f762c3ad1
  			case "error":
  				logger.warn("TSP: terminal reported an error", event);
  				return;
+ 			case "gone":
+ 				if (event.ids.includes(this.#inline.id)) {
+-					// Adopt found nothing (evicted, or another pane): start over.
+-					this.#inline = this.#newSurface("inline");
++					// The host lost the root: rebuild it in the same placement mode.
++					this.#inline = this.#newSurface(this.#inline.mode, this.#inline.role);
+ 					if (this.#live) this.#open(this.#inline);
+ 					this.#host.requestRender();
+ 					return;
+diff --git a/src/native/encode.ts b/src/native/encode.ts
+index cf3a7e86f37de19e1b674efd139ee97c150aeac7..4e3ea7f057491cc7b2b3fda7642e4cd5d63dbd94 100644
+--- a/src/native/encode.ts
++++ b/src/native/encode.ts
+@@ -2,8 +2,8 @@
+  * Tern Surface Protocol framing: `ESC _ tsp ; <verb> [; k=v]* ; <body> ESC \`.
+  *
+  * Bodies are UTF-8 JSON (JSON escapes every control character, so a body can
+- * never contain ESC or BEL) or base64 for blob chunks. A body larger than the
+- * negotiated `apc` limit is split across messages with the same verb, tagged
++ * never contain ESC or BEL) or base64 for blob chunks. Messages exceeding the
++ * negotiated APC payload limit (including tsp/verb/parameters) are split, tagged
+  * `c=<chunk-id>`, with `m=1` on every chunk but the last; the receiver joins
+  * the bodies byte-wise. Chunks split on code-point boundaries, so every chunk
+  * is valid UTF-8 on its own and the joined bytes equal the original body.
+@@ -79,7 +79,8 @@ function encodeParams(params: TspParams | undefined): string {
+ }
+ 
+ /**
+- * Encode one logical message, chunked when `body` exceeds `limit` UTF-8 bytes.
++ * Encode one logical message within `limit` UTF-8 bytes per APC payload,
++ * including identifier/verb/parameters but excluding ESC _ and ST.
+  * Returns the complete byte string to write (all chunks, in order).
+  */
+ export function encodeTspMessage(
+@@ -89,14 +90,20 @@ export function encodeTspMessage(
+ 	limit: number = TSP_DEFAULT_APC_LIMIT,
+ ): string {
+ 	const base = encodeParams(params);
++	const headerBytes = TSP_APC_ID.length + verb.length + 2 + Buffer.byteLength(base, "utf8");
++	const bodyLimit = limit - headerBytes;
+ 	// Fast path: ASCII-length bound first, exact byte count only near the limit.
+-	if (body.length * 3 <= limit || Buffer.byteLength(body, "utf8") <= limit) return frame(verb, base, body);
++	if (body.length * 3 <= bodyLimit || Buffer.byteLength(body, "utf8") <= bodyLimit) return frame(verb, base, body);
+ 	const chunkId = (nextChunkId++).toString(36);
+-	const pieces = splitUtf8(body, limit);
++	const chunkParams = `${base};c=${chunkId}`;
++	// Reserve the continuation flag on every part, including the final one.
++	const chunkLimit = bodyLimit - ";c=".length - chunkId.length - ";m=1".length;
++	if (chunkLimit < 4) throw new RangeError("TSP APC limit cannot fit chunk headers and a UTF-8 code point");
++	const pieces = splitUtf8(body, chunkLimit);
+ 	let out = "";
+ 	for (let i = 0; i < pieces.length; i++) {
+ 		const more = i < pieces.length - 1 ? ";m=1" : "";
+-		out += frame(verb, `${base};c=${chunkId}${more}`, pieces[i]!);
++		out += frame(verb, `${chunkParams}${more}`, pieces[i]!);
+ 	}
+ 	return out;
+ }
+diff --git a/src/native/reconcile.ts b/src/native/reconcile.ts
+index dcb0031a06d04556ef6c406aaa87ff8d4a2f5c31..b2700ea9dba36283f570194a7f46ec25bf967c8b 100644
+--- a/src/native/reconcile.ts
++++ b/src/native/reconcile.ts
+@@ -603,7 +603,8 @@ export class Reconciler {
+ 			return;
+ 		}
+ 		const scroll = next.node.scroll;
+-		if (scroll && scroll.n !== old.node.scroll?.n) {
++		// Hidden cached nodes consume their counter but must not move the active viewport.
++		if (scroll && scroll.n !== old.node.scroll?.n && next.node.p?.hidden !== true) {
+ 			// Presses described in one frame coalesce: repeat the latest step once per
+ 			// press (an end once), so key repeat keeps its distance.
+ 			const jump = scroll.by === "start" || scroll.by === "end";
+diff --git a/src/tui.ts b/src/tui.ts
+index bc2e55783c36c087960911ef4347bc8abcbe2683..67316cd5cf4ef7f1ac401541cfe8dff4d2119a38 100644
+--- a/src/tui.ts
++++ b/src/tui.ts
+@@ -148,6 +148,8 @@ export type PaintListener = (paint: TuiPaint) => void;
+ export interface TUIOptions {
+ 	renderScheduler?: RenderScheduler;
+ 	onPaint?: PaintListener;
++	/** Native root placement; inline scrollback remains the default. */
++	nativeSurfaceMode?: "inline" | "screen";
+ }
+ /** Physical terminal dimensions supplied to a frame provider. */
+ export interface ViewportSize {
+@@ -861,6 +863,7 @@ export class TUI extends Container {
+ 	#renderRequested = false;
+ 	#renderTimer: RenderTimer | undefined;
+ 	#renderScheduler: RenderScheduler;
++	#nativeSurfaceMode: "inline" | "screen";
+ 	#lastRenderAt = 0;
+ 	/**
+ 	 * Wall-clock cost of the most recent `#doRender()` call. Used by
+@@ -1013,6 +1016,7 @@ export class TUI extends Container {
+ 		super();
+ 		this.terminal = terminal;
+ 		this.#renderScheduler = options?.renderScheduler ?? DEFAULT_RENDER_SCHEDULER;
++		this.#nativeSurfaceMode = options?.nativeSurfaceMode ?? "inline";
+ 		if (options?.onPaint) this.#paintListeners.add(options.onPaint);
+ 		this.#showHardwareCursor = showHardwareCursor === undefined ? this.#showHardwareCursor : showHardwareCursor;
+ 		this.#watchdog = new LoopWatchdog();
+@@ -1558,6 +1562,7 @@ export class TUI extends Container {
+ 		}
+ 		this.#native = new NativeBackend(this.#nativeHost(), hello, {
+ 			mirror: this.#debugServer !== undefined,
++			surfaceMode: this.#nativeSurfaceMode,
+ 			scheduler: this.#renderScheduler === DEFAULT_RENDER_SCHEDULER ? undefined : this.#renderScheduler,
+ 		});
+ 		this.#native.start();

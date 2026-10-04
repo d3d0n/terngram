@@ -211,6 +211,7 @@ class TelegramService:
         self._full_groups: dict[tuple[str, int], dict] = {}
         self._messages: dict[tuple[int, int], dict] = {}
         self._message_versions: dict[tuple[int, int], int] = {}
+        self._deleted_messages: set[tuple[int, int]] = set()
         self._chat_versions: dict[int, int] = {}
         self._outbox: dict[str, dict] | None = None
         self._send_sequence: int | None = None
@@ -844,7 +845,7 @@ class TelegramService:
 
     def _remember(self, message: dict, version: int | None = None) -> dict | None:
         key = message["chat_id"], message["id"]
-        if version is None or version == self._message_versions.get(key, 0):
+        if key not in self._deleted_messages and (version is None or version == self._message_versions.get(key, 0)):
             self._messages[key] = message
         return self._messages.get(key)
 
@@ -889,6 +890,38 @@ class TelegramService:
                 raise ClientError("A selected message was deleted while loading.")
             messages.append(current)
         return messages
+
+    async def _media_changed(self, chat_id: int, message_id: int) -> None:
+        key = chat_id, message_id
+        while True:
+            version = self._message_versions.get(key, 0)
+            current = self._messages.get(key)
+            if current is None and key not in self._deleted_messages:
+                result = await self._request("getMessages", chat_id=chat_id, message_ids=[message_id])
+                if version != self._message_versions.get(key, 0):
+                    continue
+                current, = result["messages"]
+                if current is not None:
+                    if current["chat_id"] != chat_id or current["id"] != message_id:
+                        raise ClientError("A selected message is no longer available in this chat.")
+                    self._remember(current, version)
+                else:
+                    self._deleted_messages.add(key)
+                    self._message_versions[key] = version + 1
+            if current is None:
+                await self.on_event({"kind": "delete", "chat_id": chat_id, "ids": [message_id]})
+                break
+            try:
+                model = await self._message(current)
+            except ClientError:
+                if version != self._message_versions.get(key, 0):
+                    continue
+                raise
+            if version != self._message_versions.get(key, 0):
+                continue
+            await self.on_event({"kind": "message", "chat_id": chat_id, "message": model})
+            break
+        raise ClientError("This message's media changed.", code="MEDIA_CHANGED")
 
     async def _album(self, chat_id: int, message: dict) -> list[dict]:
         group = int(message.get("media_album_id", 0))
@@ -1335,14 +1368,31 @@ class TelegramService:
         async with _protected():
             if type(preview) is not bool:
                 raise ClientError("Choose a photo or its preview.")
-            message = (await self._existing(chat_id, [message_id]))[0]
-            version = self._message_versions.get((chat_id, message_id), 0)
+            await self._chat(chat_id)
+            self._validate_message_id(message_id)
+            key = chat_id, message_id
+            version = self._message_versions.get(key, 0)
+            result = await self._request("getMessages", chat_id=chat_id, message_ids=[message_id])
+            message, = result["messages"]
+            if message is not None and (message["chat_id"] != chat_id or message["id"] != message_id):
+                raise ClientError("A selected message is no longer available in this chat.")
+            if version != self._message_versions.get(key, 0) or key in self._deleted_messages:
+                await self._media_changed(chat_id, message_id)
+            if message is None:
+                self._messages.pop(key, None)
+                self._deleted_messages.add(key)
+                self._message_versions[key] = version + 1
+                await self._media_changed(chat_id, message_id)
+            self._remember(message, version)
             content = _visible_content(message)
             if content is None:
                 raise ClientError("Telegram restricts this content or requires protected age-verification/spoiler viewing. Open it in Telegram.", code="MEDIA_RESTRICTED")
             ephemeral = message.get("ephemeral_content")
             if ephemeral and not ephemeral.get("can_be_saved"):
                 raise ClientError("Telegram does not permit saving this temporary content.", code="MEDIA_PROTECTED")
+            media, mime = _image_media(message)
+            if media is None:
+                await self._media_changed(chat_id, message_id)
             self_destruct = bool(message.get("self_destruct_type") or content.get("is_secret"))
             if self_destruct and preview:
                 return None  # Previews must never consume protected or view-once media.
@@ -1352,10 +1402,7 @@ class TelegramService:
                     raise ClientError("Telegram requires a protected viewer for this self-destructing or view-once media. Open it in Telegram.", code="MEDIA_PROTECTED_VIEWER_REQUIRED")
                 raise ClientError("Telegram protects this content from local saving. This client will not download it.", code="MEDIA_PROTECTED")
             if version != self._message_versions.get((chat_id, message_id), 0):
-                raise ClientError("This media changed or expired while checking access. Reopen the current message.")
-            media, mime = _image_media(message)
-            if media is None:
-                raise ClientError("This message no longer contains a supported photo or image document.")
+                await self._media_changed(chat_id, message_id)
             if "sizes" in media:
                 sizes = sorted((size for size in media["sizes"] if size.get("width", 0) > 0 and size.get("height", 0) > 0), key=lambda size: size["width"] * size["height"])
                 if not sizes:
@@ -1374,13 +1421,13 @@ class TelegramService:
                 file, width, height = media["document"], 0, 0
             data = await self._download(file)
             if version != self._message_versions.get((chat_id, message_id), 0):
-                raise ClientError("This media changed or expired during download. Reopen the current message.")
+                await self._media_changed(chat_id, message_id)
             if not width or not height:
                 width, height = _image_dimensions(data, mime)
             if not preview:
                 await self._request("openMessageContent", chat_id=chat_id, message_id=message_id)
             if version != self._message_versions.get((chat_id, message_id), 0):
-                raise ClientError("This media changed or expired while opening. Reopen the current message.")
+                await self._media_changed(chat_id, message_id)
             return {"data": base64.b64encode(data).decode("ascii"), "mime": mime, "width": width, "height": height}
 
     async def avatar(self, sender_id: int) -> dict | None:
@@ -1589,6 +1636,7 @@ class TelegramService:
                 for message_id in update["message_ids"]:
                     key = chat_id, message_id
                     self._messages.pop(key, None)
+                    self._deleted_messages.add(key)
                     self._message_versions[key] = self._message_versions.get(key, 0) + 1
                     error = ClientError("TDLib deleted this pending message without confirming delivery. Check the chat before a new send.", code="SEND_UNCERTAIN")
                     self._send_results[key] = error
@@ -1685,6 +1733,7 @@ class TelegramService:
             self._full_groups.clear()
             self._messages.clear()
             self._message_versions.clear()
+            self._deleted_messages.clear()
             self._chat_versions.clear()
             self._lists_exhausted.clear()
             self._typing_sent.clear()

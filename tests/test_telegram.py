@@ -198,6 +198,29 @@ class WorkerConcurrencyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(emitted[0]["retry_scope"], "method")
         self.assertNotIn("private-rpc-input", json.dumps(emitted))
 
+    async def test_media_changed_reaches_wire_after_update_without_recording_error(self):
+        complete = asyncio.Event()
+        emitted = []
+
+        class Service:
+            def __init__(self, _directory, updated, _connection):
+                self.updated = updated
+
+            async def photo(self, chat_id, message_id):
+                await self.updated({"kind": "delete", "chat_id": chat_id, "ids": [message_id]})
+                complete.set()
+                raise ClientError("Media changed", code="MEDIA_CHANGED")
+
+            def record_error(self, *_args):
+                raise AssertionError("Expected media invalidation is not a diagnostic failure")
+
+            async def close(self):
+                pass
+
+        await self.run_worker(Service, ['{"id":1,"method":"photo","args":[123,1099511627776]}\n'], complete, emitted)
+        self.assertEqual(emitted[0], {"event": "update", "kind": "delete", "chat_id": 123, "ids": [2**40]})
+        self.assertEqual(emitted[1]["error_code"], "MEDIA_CHANGED")
+
 
 def user(user_id=42, name="Alice", **fields):
     return {"@type": "user", "id": user_id, "first_name": name, "last_name": "",
@@ -1411,8 +1434,9 @@ class TelegramMediaTest(ServiceTestCase):
         self.assertFalse(self.client.requests("downloadFile"))
         self.client.handlers["getMessages"] = {"messages": [message(content=content)]}
         self.client.handlers["getMessageProperties"] = {"can_be_saved": True, "has_protected_content_by_other_user": True}
-        with self.assertRaises(ClientError):
+        with self.assertRaises(ClientError) as raised:
             await self.service.photo(123, 2**40)
+        self.assertEqual(raised.exception.code, "MEDIA_PROTECTED")
         self.assertFalse(self.client.requests("downloadFile"))
         self.client.handlers["getMessageProperties"] = {"can_be_saved": True}
         file = self.downloaded_file(1)
@@ -1420,8 +1444,11 @@ class TelegramMediaTest(ServiceTestCase):
             await self.client.update("updateMessageContent", chat_id=123, message_id=2**40, new_content={"@type": "messageExpiredPhoto"})
             return file
         self.client.handlers["downloadFile"] = changed
-        with self.assertRaises(ClientError):
+        with self.assertRaises(ClientError) as raised:
             await self.service.photo(123, 2**40)
+        self.assertEqual(raised.exception.code, "MEDIA_CHANGED")
+        self.assertFalse(self.updates[-1]["message"].photo)
+        self.assertIsNone(self.updates[-1]["message"].media_id)
         self.assertFalse(self.client.requests("openMessageContent"))
 
     async def test_concurrent_photo_properties_and_expiry_never_return_stale_bytes(self):
@@ -1460,12 +1487,151 @@ class TelegramMediaTest(ServiceTestCase):
             finish_download.set()
             outcomes = await asyncio.gather(preview, full, return_exceptions=True)
             self.assertTrue(all(isinstance(outcome, ClientError) for outcome in outcomes), outcomes)
+            self.assertTrue(all(outcome.code == "MEDIA_CHANGED" for outcome in outcomes))
+            self.assertFalse(self.updates[-1]["message"].photo)
+            self.assertIsNone(self.updates[-1]["message"].media_id)
             self.assertFalse(self.client.requests("openMessageContent"), "expired media must not be opened or returned as usable bytes")
         finally:
             for task in (preview, full):
                 if task is not None and not task.done():
                     task.cancel()
             await asyncio.gather(*(task for task in (preview, full) if task is not None), return_exceptions=True)
+
+    async def test_photo_replacement_during_download_publishes_latest_before_failure(self):
+        content = {"@type": "messagePhoto", "photo": {"sizes": [{"width": 320, "height": 240, "photo": {"id": 1}}]}}
+        replacement = {"@type": "messagePhoto", "photo": {"sizes": [{"width": 640, "height": 480, "photo": {"id": 2}}]}}
+        self.client.handlers["getMessages"] = {"messages": [message(content=content)]}
+        self.client.handlers["getMessageProperties"] = {"can_be_saved": True}
+        old_file = self.downloaded_file(1, b"old-photo-must-not-escape")
+
+        async def download(_query):
+            await self.client.update("updateMessageContent", chat_id=123, message_id=2**40, new_content=replacement)
+            return old_file
+
+        self.client.handlers["downloadFile"] = download
+        with self.assertRaises(ClientError) as raised:
+            await self.service.photo(123, 2**40)
+        self.assertEqual(raised.exception.code, "MEDIA_CHANGED")
+        self.assertEqual(self.updates[-1]["message"].media_id, "2")
+        self.assertTrue(self.updates[-1]["message"].photo)
+        self.assertFalse(self.client.requests("openMessageContent"))
+        self.assertEqual(len(self.client.requests("getMessages")), 1)
+
+    async def test_photo_initial_removed_or_missing_snapshot_publishes_truthful_model(self):
+        for snapshot in (message(content={"@type": "messageExpiredPhoto"}), None):
+            with self.subTest(snapshot=snapshot):
+                self.client.handlers["getMessages"] = {"messages": [snapshot]}
+                with self.assertRaises(ClientError) as raised:
+                    await self.service.photo(123, 2**40)
+                self.assertEqual(raised.exception.code, "MEDIA_CHANGED")
+                if snapshot is None:
+                    self.assertEqual(self.updates[-1], {"kind": "delete", "chat_id": 123, "ids": [2**40]})
+                else:
+                    self.assertFalse(self.updates[-1]["message"].photo)
+                    self.assertIsNone(self.updates[-1]["message"].media_id)
+        self.assertFalse(self.client.requests("getMessageProperties"))
+        self.assertFalse(self.client.requests("downloadFile"))
+
+    async def test_photo_lookup_cannot_resurrect_deletion_or_overwrite_new_media(self):
+        content = {"@type": "messagePhoto", "photo": {"sizes": [{"width": 320, "height": 240, "photo": {"id": 1}}]}}
+        replacement = {"@type": "messagePhoto", "photo": {"sizes": [{"width": 640, "height": 480, "photo": {"id": 2}}]}}
+        original = message(content=content)
+        await self.client.update("updateNewMessage", message=json.loads(json.dumps(original)))
+
+        async def lookup(_query):
+            await self.client.update("updateMessageContent", chat_id=123, message_id=2**40, new_content=replacement)
+            return {"messages": [original]}
+
+        self.client.handlers["getMessages"] = lookup
+        with self.assertRaises(ClientError) as raised:
+            await self.service.photo(123, 2**40)
+        self.assertEqual(raised.exception.code, "MEDIA_CHANGED")
+        self.assertEqual(self.updates[-1]["message"].media_id, "2")
+
+        async def deleted_lookup(_query):
+            await self.client.update("updateDeleteMessages", chat_id=123, message_ids=[2**40], is_permanent=True)
+            return {"messages": [original]}
+
+        self.client.handlers["getMessages"] = deleted_lookup
+        with self.assertRaises(ClientError) as raised:
+            await self.service.photo(123, 2**40)
+        self.assertEqual(raised.exception.code, "MEDIA_CHANGED")
+        self.assertEqual(self.updates[-1], {"kind": "delete", "chat_id": 123, "ids": [2**40]})
+        self.assertNotIn((123, 2**40), self.service._messages)
+        self.assertFalse(self.client.requests("downloadFile"))
+
+    async def test_photo_network_and_storage_failures_are_not_expected_invalidation(self):
+        content = {"@type": "messagePhoto", "photo": {"sizes": [{"width": 320, "height": 240, "photo": {"id": 1}}]}}
+        self.client.handlers["getMessages"] = {"messages": [message(content=content)]}
+        self.client.handlers["getMessageProperties"] = {"can_be_saved": True}
+        for failure in (TDLibError(500, "offline"), OSError("storage unavailable")):
+            with self.subTest(failure=type(failure).__name__):
+                self.client.handlers["downloadFile"] = failure
+                with self.assertRaises(ClientError) as raised:
+                    await self.service.photo(123, 2**40)
+                self.assertNotEqual(raised.exception.code, "MEDIA_CHANGED")
+        self.assertFalse(self.client.requests("openMessageContent"))
+
+    async def test_photo_changes_at_access_and_open_and_deletion_during_download(self):
+        content = {"@type": "messagePhoto", "photo": {"sizes": [{"width": 320, "height": 240, "photo": {"id": 1}}]}}
+        file = self.downloaded_file(1, b"removed-photo-must-not-escape")
+        for stage in ("access", "open", "delete"):
+            with self.subTest(stage=stage):
+                self.client.calls.clear()
+                self.client.handlers["getMessages"] = {"messages": [message(content=content)]}
+                self.client.handlers["getMessageProperties"] = {"can_be_saved": True}
+                self.client.handlers["downloadFile"] = file
+                self.client.handlers["openMessageContent"] = {"@type": "ok"}
+
+                async def changed(_query):
+                    await self.client.update("updateMessageContent", chat_id=123, message_id=2**40, new_content={"@type": "messageExpiredPhoto"})
+                    return {"can_be_saved": True} if stage == "access" else {"@type": "ok"}
+
+                async def deleted(_query):
+                    await self.client.update("updateDeleteMessages", chat_id=123, message_ids=[2**40], is_permanent=True)
+                    return file
+
+                if stage == "access":
+                    self.client.handlers["getMessageProperties"] = changed
+                elif stage == "open":
+                    self.client.handlers["openMessageContent"] = changed
+                else:
+                    self.client.handlers["downloadFile"] = deleted
+                with self.assertRaises(ClientError) as raised:
+                    await self.service.photo(123, 2**40)
+                self.assertEqual(raised.exception.code, "MEDIA_CHANGED")
+                if stage == "delete":
+                    self.assertEqual(self.updates[-1], {"kind": "delete", "chat_id": 123, "ids": [2**40]})
+                    self.assertNotIn((123, 2**40), self.service._messages)
+                else:
+                    self.assertFalse(self.updates[-1]["message"].photo)
+                if stage != "open":
+                    self.assertFalse(self.client.requests("openMessageContent"))
+                if stage == "access":
+                    self.assertFalse(self.client.requests("downloadFile"))
+
+    async def test_uncached_photo_change_fetches_current_model_without_stale_resurrection(self):
+        content = {"@type": "messagePhoto", "photo": {"sizes": [{"width": 320, "height": 240, "photo": {"id": 1}}]}}
+        current = message(content={"@type": "messageExpiredPhoto"})
+        calls = 0
+
+        async def lookup(_query):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                await self.client.update("updateMessageContent", chat_id=123, message_id=2**40, new_content=current["content"])
+                return {"messages": [message(content=content)]}
+            return {"messages": [current]}
+
+        self.client.handlers["getMessages"] = lookup
+        with self.assertRaises(ClientError) as raised:
+            await self.service.photo(123, 2**40)
+        self.assertEqual(raised.exception.code, "MEDIA_CHANGED")
+        self.assertEqual(calls, 2)
+        self.assertFalse(self.updates[-1]["message"].photo)
+        self.assertIsNone(self.updates[-1]["message"].media_id)
+        self.assertEqual(self.service._messages[(123, 2**40)], current)
+        self.assertFalse(self.client.requests("downloadFile"))
 
     async def test_download_rejects_database_files_outside_paths_traversal_and_symlinks(self):
         from io import BytesIO

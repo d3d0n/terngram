@@ -20,3 +20,6 @@ last-error.json
 tdlib/
 outbox.json
 send-sequence.json
+.ruff_cache/
+tern-focus*.jsonl
+terngram-debug*.jsonl

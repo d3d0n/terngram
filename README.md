@@ -18,11 +18,11 @@ Requires **Apple Silicon, macOS 27+, Tern 0.4+**. Install with one command:
 tern plugin install github.com/d3d0n/terngram
 ```
 
-Choose **Open Terngram** from Tern's command palette. On first launch, the plugin downloads the standalone 0.1.0 runtime and checks its pinned SHA256 before extracting or executing it. Bun, Python, TDLib and their runtime dependencies are included; no Homebrew or uv setup is needed. Later launches use the cached runtime without downloading again. If `tern` is not on your PATH, use `/Applications/Tern.app/Contents/MacOS/tern`.
+Choose **Open Terngram** from Tern's command palette. On first launch, the plugin downloads the standalone 0.1.1 runtime and checks its pinned SHA256 before extracting or executing it. Bun, Python, TDLib and their runtime dependencies are included; no Homebrew or uv setup is needed. Later launches use the cached runtime without downloading again. If `tern` is not on your PATH, use `/Applications/Tern.app/Contents/MacOS/tern`.
 
 The runtime lives under `$XDG_CACHE_HOME/terngram`, or `~/Library/Caches/terngram` by default; account data remains separate. To replace an existing installed copy, add `--force` to the install command (linked plugins must be unlinked first).
 
-For an offline installation, download the ZIP and `.sha256` from [release 0.1.0](https://github.com/d3d0n/terngram/releases/tag/v0.1.0), verify with `shasum -a 256 -c terngram-0.1.0-macos-arm64.zip.sha256`, unzip, then run `tern plugin install ./terngram`.
+For an offline installation, download the ZIP and `.sha256` from [release 0.1.1](https://github.com/d3d0n/terngram/releases/tag/v0.1.1), verify with `shasum -a 256 -c terngram-0.1.1-macos-arm64.zip.sha256`, unzip, then run `tern plugin install ./terngram`.
 
 The package has no new Developer ID signature or Apple notarization; supplied runtime signatures are preserved. macOS may require explicit approval. Do not disable Gatekeeper globally. The macOS 27 minimum comes from the bundled native binaries, not from Tern's own minimum version. See the archive's `INSTALL.md` and `BUILD-INFO.json` for details.
 
@@ -30,7 +30,7 @@ The package has no new Developer ID signature or Apple notarization; supplied ru
 
 Use an interactive **Tern** terminal. The current setup has been exercised on macOS with Tern 0.3.0; an ordinary terminal is not a substitute for its native surface protocol.
 
-You need [Bun](https://bun.sh/) **1.3.14+**, [uv](https://docs.astral.sh/uv/), Python **3.12+** and a native TDLib build **1.8.67 or newer**.
+You need [mise](https://mise.jdx.dev/) and a native TDLib build **1.8.67 or newer**. `mise.toml` pins Bun, uv and Ruff; uv manages Python **3.12+**.
 
 From this checkout:
 
@@ -38,9 +38,10 @@ From this checkout:
 # Build the official native Telegram engine on macOS.
 brew install tdlib --HEAD
 
-# Install the UI dependencies, then launch inside Tern.
-bun install --frozen-lockfile
-uv run terngram
+# Trust the checkout, install pinned tools, then launch inside Tern.
+mise trust
+mise install
+mise run start
 ```
 
 `uv` manages the Python environment, including QR-image dependencies. It **does not install TDLib**. The older TDLib 1.8.0 Homebrew build does not meet this client's version floor; the command above builds current upstream sources instead. A minimum-version check is not a guarantee that every future native API change is compatible.
@@ -48,10 +49,14 @@ uv run terngram
 The loader searches system and Homebrew locations. For a specific compatible library:
 
 ```sh
-TERNGRAM_TDLIB_LIBRARY=/opt/homebrew/opt/tdlib/lib/libtdjson.dylib uv run terngram
+TERNGRAM_TDLIB_LIBRARY=/opt/homebrew/opt/tdlib/lib/libtdjson.dylib mise run start
 ```
 
 See [development setup](docs/development.md) for dependency checks, troubleshooting and the native-library boundary.
+
+The source client opens as a separate native screen, so its UI is not part of terminal scrollback. To try the screen-surface fix, close the old client and run `uv run --frozen terngram` inside Tern; the cached palette release does not pick up source edits. See [screen-surface launch notes](docs/development.md#run-the-screen-surface-fix).
+
+For verbose, content-free application diagnostics from this checkout, close the existing client first, then run `uv run --frozen terngram --debug-log ./terngram-debug.jsonl` inside Tern. The file must be new; see the [debug logging guide](docs/development.md#verbose-application-logging) for reproduction steps and privacy limits.
 
 ## Sign in
 
@@ -92,7 +97,7 @@ In the palette, `>` limits results to commands and `@` to chats. Without either 
 The default data directory is `~/.local/share/terngram`, or `$XDG_DATA_HOME/terngram`. Override it when needed:
 
 ```sh
-uv run terngram --data-dir /path/to/private/terngram-data
+mise run start --data-dir /path/to/private/terngram-data
 ```
 
 It contains API credentials, TDLib authorization and message/media caches, drafts and delivery-recovery state. **Treat the entire directory as sensitive account data.** Private file permissions are not encryption at rest.
@@ -115,12 +120,21 @@ This is a focused client, not feature parity with Telegram Desktop.
 Start with [AGENTS.md](AGENTS.md) for the documentation index, or go straight to the [development guide](docs/development.md).
 
 ```sh
-bun run check          # TypeScript contracts
-bun run test           # Bun tests and Python unittest suite
-bun .smoke-client.ts   # Native frames, app transitions and isolated worker storage
+mise run lint          # TypeScript contracts, Python runtime-error rules, shell syntax
+mise run test          # Bun tests and Python unittest suite
+mise run smoke         # Native frames, app transitions and isolated worker storage
+mise run check         # All of the above
 ```
 
 The automated suite uses isolated fixtures, not your Telegram account. The smoke harness exercises the real native backend/document machinery, but it does not prove Tern's painted geometry or live Telegram delivery.
+
+Build and verify a standalone macOS arm64 ZIP without publishing:
+
+```sh
+mise run release /opt/homebrew/opt/tdlib/lib/libtdjson.dylib
+```
+
+See [release workflow](docs/development.md#release-workflow) for build-only commands, outputs and publication pins. `mise tasks ls --local` lists all project tasks.
 
 | Guide | What it owns |
 | --- | --- |

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify a local macOS release without installing it or opening an account.
 
-Usage: python3 scripts/verify_release.py ARTIFACT CHECKOUT_OR_SMOKE_CLIENT
+Usage: mise run release:verify ARTIFACT
 The verifier host needs Python 3.12+ and Apple's /usr/bin/otool and lipo.
 Every application/fixture process uses only the relocated bundled runtimes.
 """
@@ -529,7 +529,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("artifact", type=Path, help="produced ZIP (with .zip.sha256 sidecar) or package root directory")
     parser.add_argument("fixtures", type=Path, help="source checkout or its .smoke-client.ts fixture harness")
-    parser.add_argument("--expected-version", default="0.1.0")
+    parser.add_argument("--expected-version", default="0.1.1")
     args = parser.parse_args()
     fixture = args.fixtures / ".smoke-client.ts" if args.fixtures.is_dir() else args.fixtures
     try:
