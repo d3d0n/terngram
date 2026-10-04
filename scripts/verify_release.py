@@ -529,7 +529,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("artifact", type=Path, help="produced ZIP (with .zip.sha256 sidecar) or package root directory")
     parser.add_argument("fixtures", type=Path, help="source checkout or its .smoke-client.ts fixture harness")
-    parser.add_argument("--expected-version", default="0.1.1")
+    parser.add_argument("--expected-version", default="0.1.2")
     args = parser.parse_args()
     fixture = args.fixtures / ".smoke-client.ts" if args.fixtures.is_dir() else args.fixtures
     try:

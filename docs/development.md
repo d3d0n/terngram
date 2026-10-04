@@ -220,9 +220,9 @@ mise run release /opt/homebrew/opt/tdlib/lib/libtdjson.dylib
 TERNGRAM_TDLIB_LIBRARY=/path/to/libtdjson.dylib mise run release
 
 # Separate steps; build forwards all original builder options.
-mise run build --tdlib /path/to/libtdjson.dylib --expect-version 0.1.1
+mise run build --tdlib /path/to/libtdjson.dylib --expect-version 0.1.2
 mise run build -- --help
-mise run release:verify dist/terngram-0.1.1-macos-arm64.zip
+mise run release:verify dist/terngram-0.1.2-macos-arm64.zip
 ```
 
 `release` and `release:verify` read the expected application version from `pyproject.toml`. The builder also requires `packaging/tern/plugin.toml` to match. For a version bump, update the builder's default `--expect-version` too, or pass it explicitly when using `build`.

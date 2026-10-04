@@ -9,7 +9,7 @@ This is an unofficial Telegram client. It is not affiliated with Telegram. **No 
 1. Check the archive against its adjacent `.sha256` file: `shasum -a 256 -c terngram-@VERSION@-macos-arm64.zip.sha256` in the download directory.
 2. Unzip the archive. Keep the entire `terngram` directory together; its launcher and plugin use package-relative paths, including paths containing spaces.
 3. Put that directory at `~/.config/tern/plugins/terngram`, or `plugins/terngram` inside your configured `TERN_CONFIG_DIR`. Do not merge it with an older installation: replace the package directory, keeping personal Telegram data outside it. Tern must discover `plugin.toml` directly inside that directory.
-4. Restart Tern, then open its command palette and select **Open Terngram**. The plugin opens the bundled native client in a new tab. It does not load account data itself.
+4. Restart Tern, then open its command palette and select **Open Terngram** for a new tab, or **Open Terngram in Block** for a new block to the right of the focused block in the current tab. Both launch the bundled native client; the plugin does not load account data itself.
 
 To inspect CLI options without opening Telegram or a Tern pane:
 

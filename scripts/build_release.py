@@ -627,7 +627,7 @@ def main() -> None:
     parser.add_argument('--license-file', type=Path, action='append', default=[], help='Optional additional existing notice/license text to copy; no completeness claim')
     parser.add_argument('--output-dir', type=Path, default=REPO / 'dist', help='Output directory; never overwrite existing release files')
     parser.add_argument('--staging-dir', type=Path, default=REPO / 'build/macos-release', help='Builder-owned staging parent; each build gets a new subdirectory')
-    parser.add_argument('--expect-version', default='0.1.1', help='Required project/plugin version')
+    parser.add_argument('--expect-version', default='0.1.2', help='Required project/plugin version')
     parser.add_argument('--expect-python-version', help='Optional exact interpreter version requirement')
     parser.add_argument('--expect-bun-version', help='Optional exact Bun binary version requirement')
     parser.add_argument('--expect-tdlib-version', help='Optional exact TDLib version requirement')
