@@ -600,6 +600,8 @@ export class TerngramApp implements Component {
     if (changingChat) { this.avatars.cancelQueued(); this.previews.cancelQueued(); this.closePhoto(); }
     this.selectedId = id; this.actionMessage = this.deleteConfirm = null;
     const thread = this.thread(id);
+    // Cached chats share Tern's one viewport, whose offset is never reported: return followed chats to latest.
+    if (changingChat && thread.loaded && !this.detached.has(id)) this.scrolls.set(id, { by: "end", n: (this.scrolls.get(id)?.n ?? 0) + 1 });
     this.setComposer(thread.draft, changingChat); this.schedulePersist(); this.redraw(); this.focusDefault();
     this.queuePreviews(id);
     for (const message of thread.messages) this.queueAvatar(message.sender_id);

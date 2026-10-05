@@ -2,8 +2,8 @@
 # Git-installed plugins fetch the pinned standalone runtime on first launch.
 set -eu
 umask 077
-VERSION=0.1.2
-SHA256=8e6b31e188c8edad5fb48b4e2d5fda23b2d30e5f291906cdf7d94caeac3beb33
+VERSION=0.1.3
+SHA256=bf2a1da4a22cee1467c66ee3e137a8f1c6ef9fd955816739696305490626f509
 
 fail() {
     printf 'Terngram: %s\n' "$*" >&2

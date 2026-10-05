@@ -1,6 +1,6 @@
 schema = 1
 id = "terngram"
 name = "Terngram"
-version = "0.1.2"
+version = "0.1.3"
 icon = "terminal"
 window = "packaging/tern/window.luau"

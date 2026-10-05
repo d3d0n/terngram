@@ -679,6 +679,11 @@ try {
   assert.equal(app.composer.getText(), "Bob draft");
   assert(snapshot().some(node => node.k === "text" && node.p?.spans?.map(span => span.t).join("") === "Bob history"));
   action("bottom"); draw();
+  const beforeDetachedReturn = frames.length;
+  action("chat:1"); draw();
+  assert(!frames.slice(beforeDetachedReturn).some(frame => frame.ops.some(op => op[0] === "scroll")), "returning to a detached chat does not force latest");
+  action("chat:2"); draw();
+  assert(frames.at(-1)!.ops.some(op => op[0] === "scroll" && op[2] === "end"), "returning to a followed chat restores latest");
   action("chat:1"); draw();
   action(`message:${alice.messages[0]!.id}`); draw();
   assert(snapshot().some(node => node.p?.selected === true), "history selection is visible before jumping to latest");

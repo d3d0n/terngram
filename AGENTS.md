@@ -17,5 +17,6 @@ Terngram is an unofficial, native Telegram client for Tern. The UI is TypeScript
 
 - Read the relevant guide and implementation before editing. Update both sides of any worker/UI contract; code is the source of truth.
 - Preserve draft and delivery identity. Queued is not sent; an ambiguous result is not permission to send another copy.
+- NEVER reproduce bugs inside live Tern. Use isolated offline fixtures or offscreen scenarios; never drive live user panes, tabs, or windows for reproduction.
 - Use isolated fixtures by default. Live account access requires explicit permission and must stay within the authorized chat and operation scope. Never publish account data, QR codes or protocol traces.
 - A native tree or ACK is not proof of painted geometry, visibility or full Terms compliance. Report the checks actually run and their limits.

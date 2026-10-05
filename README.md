@@ -20,11 +20,11 @@ tern plugin install github.com/d3d0n/terngram
 
 Choose **Open Terngram** for a new tab, or **Open Terngram in Block** for a new block to the right of the focused block in the current tab.
 
-On first launch, the plugin downloads the standalone 0.1.2 runtime and checks its pinned SHA256 before extracting or executing it. Bun, Python, TDLib and their runtime dependencies are included; no Homebrew or uv setup is needed. Later launches use the cached runtime without downloading again. If `tern` is not on your PATH, use `/Applications/Tern.app/Contents/MacOS/tern`.
+On first launch, the plugin downloads the standalone 0.1.3 runtime and checks its pinned SHA256 before extracting or executing it. Bun, Python, TDLib and their runtime dependencies are included; no Homebrew or uv setup is needed. Later launches use the cached runtime without downloading again. If `tern` is not on your PATH, use `/Applications/Tern.app/Contents/MacOS/tern`.
 
 The runtime lives under `$XDG_CACHE_HOME/terngram`, or `~/Library/Caches/terngram` by default; account data remains separate. To replace an existing installed copy, add `--force` to the install command (linked plugins must be unlinked first).
 
-For an offline installation, download the ZIP and `.sha256` from [release 0.1.2](https://github.com/d3d0n/terngram/releases/tag/v0.1.2), verify with `shasum -a 256 -c terngram-0.1.2-macos-arm64.zip.sha256`, unzip, then run `tern plugin install ./terngram`.
+For an offline installation, download the ZIP and `.sha256` from [release 0.1.3](https://github.com/d3d0n/terngram/releases/tag/v0.1.3), verify with `shasum -a 256 -c terngram-0.1.3-macos-arm64.zip.sha256`, unzip, then run `tern plugin install ./terngram`.
 
 The package has no new Developer ID signature or Apple notarization; supplied runtime signatures are preserved. macOS may require explicit approval. Do not disable Gatekeeper globally. The macOS 27 minimum comes from the bundled native binaries, not from Tern's own minimum version. See the archive's `INSTALL.md` and `BUILD-INFO.json` for details.
 

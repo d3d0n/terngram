@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "terngram"
-version = "0.1.2"
+version = "0.1.3"
 description = "A native Telegram client for Tern"
 requires-python = ">=3.12"
 dependencies = ["qrcode[pil]>=8.2,<9"]

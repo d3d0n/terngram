@@ -100,6 +100,8 @@ Without an overlay, Esc cancels a pending gallery opening first, then deletion c
 
 Latest (**Ctrl+L** / **Latest messages**) clears the old message selection and deletion confirmation before following the end; it does not cancel reply/edit mode or replace the draft. Cached inactive threads remain mounted, but their tail anchors never request reveal. The SDK consumes scroll counters on explicitly hidden targets without moving the active viewport or replaying that command when shown. Rebuilding a screen and late message/decorative updates therefore must not restore a stale history-selection anchor. Paging/selection still detach the current chat normally; there is no periodic forced scroll-to-bottom.
 
+All cached chats share the screen's single native scroller, and Tern never reports its offset. Switching to a loaded chat that is not detached therefore requests its end again, so Back/Forward or the palette return a followed chat to latest. A detached chat is not forced to latest, but its exact history offset cannot be restored; trackpad scrolling is unobserved and does not detach a chat.
+
 ## Draft, edit and pending-send transitions
 
 Opening a chat immediately selects it, restores its draft/focus, schedules persistence and decorations; history is awaited only if not yet loaded. Reply preserves draft text. Edit snapshots the original draft/reply target and uses the message's Markdown; cancel restores that snapshot. A successful edit restores it only if the user has not changed the buffer/mode meanwhile. Delete updates clear removed reply/edit targets. Albums are one selection unit; a missing reply target displays its message number.
